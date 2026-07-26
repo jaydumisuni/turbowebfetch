@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import codeops_live_provider
 
 _original_compress = codeops_live_provider.compress_codeops_task
+_context_number = 0
 
 
 def _compress_with_nodenext_rule(task: str, **kwargs):
-    """Add repository-wide module and initial-scope rules to the provider contract."""
+    """Add reviewed rules and preserve the exact bounded provider request as evidence."""
+    global _context_number
     payload = json.loads(task)
     rules = payload.get("rules")
     if not isinstance(rules, list):
@@ -27,10 +30,22 @@ def _compress_with_nodenext_rule(task: str, **kwargs):
         rules.append(
             "The initial proposal must include src/rate-limit/limiter.test.ts with deterministic Vitest assertions for confirmed extractDomain behaviour. Do not defer this test file to a correction pass because corrections cannot expand the approved file scope."
         )
-    return _original_compress(
+    compressed, metadata = _original_compress(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
         **kwargs,
     )
+    _context_number += 1
+    evidence_dir = Path("codeops-staged-evidence") / "provider-contexts"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / f"provider-task-{_context_number:03d}.json").write_text(
+        compressed,
+        encoding="utf-8",
+    )
+    (evidence_dir / f"provider-task-{_context_number:03d}-metadata.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return compressed, metadata
 
 
 codeops_live_provider.compress_codeops_task = _compress_with_nodenext_rule
