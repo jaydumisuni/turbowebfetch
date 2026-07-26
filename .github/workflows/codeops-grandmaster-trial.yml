@@ -12,10 +12,12 @@ permissions:
 jobs:
   codeops-proof:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - name: Checkout trial repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -30,22 +32,46 @@ jobs:
           npm ci --ignore-scripts
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install --no-deps --no-build-isolation 'git+https://github.com/jaydumisuni/hunter-codeops.git@main'
-      - name: Run CodeOps repository recovery and proof
+      - name: Run CodeOps recovery, executor replay, and proof
+        env:
+          TRIAL_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          TRIAL_RUN_ID: ${{ github.run_id }}
         run: |
           python - <<'PY'
           import json
+          import os
+          import subprocess
+          import tempfile
           from pathlib import Path
 
+          from hunter_codeops.code_ops_coding import (
+              dry_run_generated_plan,
+              execute_generated_plan,
+              generate_coding_plan,
+          )
+          from hunter_codeops.code_ops_provider import ProviderExecutionResult
           from hunter_codeops.code_ops_repository import (
               discover_proof_commands,
               recover_repository_context,
               run_proof_commands,
           )
+          from hunter_codeops.code_ops_switcher import (
+              ClientKind,
+              ClientRoute,
+              CodeOpsSwitchDecision,
+              ProviderKind,
+              ProviderRoute,
+          )
           from hunter_codeops.language_mastery_assessment import assess_language_mastery
           from hunter_codeops.language_mastery_models import LanguageId
 
-          root = Path.cwd().resolve()
+          candidate_root = Path.cwd().resolve()
           changed = (
+              '.eslintrc.cjs',
+              '.github/workflows/codeops-grandmaster-trial.yml',
+              'docs/FAIR_SCHEDULER.md',
+              'package.json',
+              'src/rate-limit/limiter.ts',
               'src/scheduler/fair-scheduler.ts',
               'src/scheduler/fair-scheduler.test.ts',
               'src/tools/fetch-scheduled.ts',
@@ -55,26 +81,149 @@ jobs:
           )
           objective = (
               'Add a fair abortable browser scheduler with global and per-domain '
-              'concurrency, queue timeouts, idempotent release, dynamic batch '
-              'scheduling, order preservation, and worker-crash isolation.'
+              'concurrency, queue timeouts, scheduler-owned failure-safe release, '
+              'dynamic batch scheduling, order preservation, worker-crash isolation, '
+              'and a mixed-domain stress proof.'
           )
-          context = recover_repository_context(root, objective)
-          commands = discover_proof_commands(root, changed)
-          results = run_proof_commands(root, commands)
+
+          context = recover_repository_context(candidate_root, objective)
+          commands = discover_proof_commands(candidate_root, changed)
+          direct_results = run_proof_commands(candidate_root, commands)
           assessment = assess_language_mastery(
               LanguageId.TYPESCRIPT,
-              root,
+              candidate_root,
               (),
               changed_files=changed,
           )
+
+          base_root = Path(tempfile.mkdtemp(prefix='codeops-grandmaster-base-'))
+          subprocess.run(
+              ['git', 'worktree', 'add', '--detach', str(base_root), 'origin/main'],
+              cwd=candidate_root,
+              check=True,
+              text=True,
+          )
+          subprocess.run(
+              ['npm', 'ci', '--ignore-scripts'],
+              cwd=base_root,
+              check=True,
+              text=True,
+          )
+
+          operations = []
+          for relative in changed:
+              content = (candidate_root / relative).read_text(encoding='utf-8')
+              operations.append({
+                  'path': relative,
+                  'action': 'write',
+                  'content': content,
+                  'old': '',
+                  'new': '',
+                  'required': True,
+              })
+
+          proposal = {
+              'schema_version': '1.0',
+              'summary': 'Implement and prove fair browser process scheduling',
+              'operations': operations,
+              'acceptance_checks': [
+                  'global and per-domain limits are enforced',
+                  'domains are scheduled fairly',
+                  'queued work can expire or abort without leaking capacity',
+                  'thrown workers release capacity',
+                  'batch results preserve input order and isolate worker failure',
+                  'lint, strict typecheck, Vitest, and production build pass',
+              ],
+              'assumptions': [
+                  'the existing token bucket and raw process semaphore remain separate safety boundaries',
+              ],
+              'risks': [
+                  'concurrency defects could leak capacity or starve a domain',
+              ],
+              'confidence': 0.9,
+          }
+
+          provider_route = ProviderRoute(
+              id='chatgpt-assistant-trial-provider',
+              kind=ProviderKind.OLLAMA,
+              model='gpt-5.6-thinking-assistant-candidate',
+              endpoint='http://127.0.0.1/deterministic-candidate',
+              local=True,
+              capabilities=('repo_patch',),
+          )
+          decision = CodeOpsSwitchDecision(
+              provider=provider_route,
+              client=ClientRoute('grandmaster-trial', ClientKind.TERMINAL),
+              mode='repo_patch',
+              review_required=True,
+              reason='replay the assistant-authored hard feature through CodeOps',
+          )
+
+          def candidate_provider(selected, prompt, **kwargs):
+              return ProviderExecutionResult(
+                  selected.provider.id,
+                  selected.provider.model,
+                  json.dumps(proposal),
+                  {
+                      'classification': 'assistant_candidate_replay',
+                      'live_provider': False,
+                  },
+              )
+
+          plan = generate_coding_plan(
+              decision,
+              objective,
+              base_root,
+              operation_id='grandmaster-trial-1',
+              executor=candidate_provider,
+          )
+          dry_run = dry_run_generated_plan(base_root, plan)
+          execution = execute_generated_plan(
+              decision,
+              plan,
+              approved=True,
+              max_corrections=0,
+              executor=candidate_provider,
+          )
+
+          mismatches = [
+              relative
+              for relative in changed
+              if (base_root / relative).read_bytes()
+              != (candidate_root / relative).read_bytes()
+          ]
+
           evidence = {
-              'classification': 'assistant_provider_plus_codeops_engine_trial',
+              'classification': 'assistant_provider_plus_codeops_executor_trial',
+              'coding_provider': 'GPT-5.6 Thinking assistant candidate replay',
+              'codeops_role': [
+                  'repository recovery',
+                  'strict patch-plan validation',
+                  'dry-run',
+                  'approval-bound transactional apply',
+                  'repository proof discovery and execution',
+                  'mastery assessment',
+              ],
               'live_provider': False,
               'grand_master_claim': False,
+              'repository': os.environ.get('GITHUB_REPOSITORY'),
+              'trial_head_sha': os.environ.get('TRIAL_HEAD_SHA'),
+              'workflow_run_id': os.environ.get('TRIAL_RUN_ID'),
               'objective': objective,
+              'corrections_observed': [
+                  'restored the repository TypeScript lint configuration',
+                  'fixed an existing domain-parser lint defect',
+                  'converted nested scheduler log state to scalar fields',
+                  'removed the public scheduler bypass',
+                  'added scheduler-owned release and a sixty-task stress proof',
+              ],
               'context': context.summary_dict(),
-              'commands': [command.to_dict() for command in commands],
-              'results': [result.to_dict() for result in results],
+              'direct_commands': [command.to_dict() for command in commands],
+              'direct_results': [result.to_dict() for result in direct_results],
+              'plan': plan.to_dict(),
+              'dry_run': dry_run,
+              'execution': execution.to_dict(),
+              'candidate_mismatches': mismatches,
               'assessment': assessment.to_dict(),
           }
           Path('codeops-trial-evidence.json').write_text(
@@ -82,8 +231,15 @@ jobs:
               encoding='utf-8',
           )
           print(json.dumps(evidence, indent=2, sort_keys=True))
-          if not commands or len(results) != len(commands) or not all(item.passed for item in results):
-              raise SystemExit(1)
+
+          if not commands or len(direct_results) != len(commands):
+              raise SystemExit('Direct proof profile did not complete')
+          if not all(item.passed for item in direct_results):
+              raise SystemExit('Direct repository proof failed')
+          if execution.status != 'ready_for_sergeant_review':
+              raise SystemExit(f'CodeOps executor status: {execution.status}')
+          if execution.restored or mismatches:
+              raise SystemExit(f'CodeOps executor reproduction mismatches: {mismatches}')
           if assessment.mastered:
               raise SystemExit('A single trial must never claim language mastery')
           PY
