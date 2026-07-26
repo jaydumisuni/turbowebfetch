@@ -7,7 +7,7 @@
  * - round-robin-style fairness across keys;
  * - queue cancellation and queue wait timeouts;
  * - idempotent lease release;
- * - no task execution inside the scheduler itself.
+ * - automatic release after task success or failure through run().
  */
 
 export interface FairTaskSchedulerOptions {
@@ -143,6 +143,19 @@ export class FairTaskScheduler {
       this.queue.push(entry);
       this.dispatch();
     });
+  }
+
+  async run<T>(
+    key: string,
+    task: () => Promise<T> | T,
+    options: SchedulerAcquireOptions = {}
+  ): Promise<T> {
+    const lease = await this.acquire(key, options);
+    try {
+      return await task();
+    } finally {
+      lease.release();
+    }
   }
 
   close(): void {
