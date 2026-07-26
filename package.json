@@ -23,7 +23,7 @@
     "start": "node dist/index.js",
     "test": "vitest",
     "test:run": "vitest run",
-    "lint": "eslint src/",
+    "lint": "eslint \"src/**/*.ts\"",
     "typecheck": "tsc --noEmit",
     "setup:python": "bash python/setup.sh",
     "postinstall": "node scripts/postinstall.js",
