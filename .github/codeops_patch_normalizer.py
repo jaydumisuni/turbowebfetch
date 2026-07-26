@@ -2,13 +2,14 @@
 
 The normaliser never authors code. It may:
 - clear non-string values from text fields that are forbidden and unused for the
-  selected action; and
+  selected action;
+- discard exact no-op replacements while recording that decision; and
 - consolidate multiple exact replace operations for one existing file into one
   write operation because CodeOps requires one operation per path.
 
 It never changes a path, selected action, write content, replacement source, or
-replacement result. Mixed actions, missing required text, repeated source text,
-no-op replacements, and new duplicate files fail closed.
+replacement result. Mixed actions, missing required text, conflicting duplicate
+edits, repeated source text, and new duplicate files fail closed.
 """
 from __future__ import annotations
 
@@ -86,6 +87,25 @@ def normalize_provider_patch(
                             "mechanical_only": True,
                         }
                     )
+
+    filtered_operations: list[dict[str, Any]] = []
+    for item in operations:
+        if item.get("action") == "replace":
+            old = item.get("old")
+            new = item.get("new")
+            if isinstance(old, str) and old and isinstance(new, str) and old == new:
+                normalizations.append(
+                    {
+                        "path": str(item.get("path", "")),
+                        "action": "replace",
+                        "result": "discarded_exact_noop_replacement",
+                        "mechanical_only": True,
+                    }
+                )
+                continue
+        filtered_operations.append(item)
+    operations = filtered_operations
+    payload["operations"] = operations
 
     paths = [str(item.get("path", "")) for item in operations]
     duplicates = {path for path, count in Counter(paths).items() if path and count > 1}
