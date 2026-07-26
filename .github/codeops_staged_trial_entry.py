@@ -45,6 +45,8 @@ def _compress_with_nodenext_rule(task: str, **kwargs):
                 "Invoke caller work through a promise boundary or explicit try/catch so a synchronous throw becomes a rejected task and capacity is released exactly once in finally.",
                 "Tests for cancellation and queue timeout must first occupy the relevant capacity so the tested task is genuinely queued. Fairness tests must assert early cross-domain progress, not merely final task counts.",
                 "Validate global and per-domain concurrency limits as positive integers and reject invalid scheduler configuration.",
+                "Do not declare a local loop-control variable that is assigned but never read, such as started. When one task is started per scheduling pass, start it and return or break directly without an unused flag.",
+                "Never modify .eslintrc.cjs, package.json, or another proof configuration to hide a scheduler-source lint failure. Correct the named scheduler source or scheduler test inside the approved stage scope.",
             )
         )
     if "integrate the existing scheduler core" in objective:
