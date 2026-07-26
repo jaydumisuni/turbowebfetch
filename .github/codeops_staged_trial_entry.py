@@ -29,12 +29,23 @@ codeops_live_provider.compress_codeops_task = _compress_with_nodenext_rule
 
 import codeops_staged_trial
 
+_scheduler_context = (
+    "src/scheduler/Scheduler.ts",
+    "src/scheduler/Scheduler.test.ts",
+    "src/scheduler/scheduler.ts",
+    "src/scheduler/scheduler.test.ts",
+    "src/utils/scheduler.ts",
+    "src/utils/scheduler.test.ts",
+    "tests/scheduler.test.ts",
+)
+
 _reviewed_stages = []
 for stage in codeops_staged_trial.STAGES:
     if stage.id == "scheduler-core":
         stage = replace(
             stage,
             path_hints=(
+                *_scheduler_context,
                 "package.json",
                 "tsconfig.json",
                 "src/tools/fetch-batch.ts",
@@ -45,17 +56,7 @@ for stage in codeops_staged_trial.STAGES:
             max_corrections=3,
         )
     elif stage.id in {"batch-integration", "challenge-hardening"}:
-        hints = tuple(
-            dict.fromkeys(
-                (
-                    "src/utils/scheduler.ts",
-                    "src/utils/scheduler.test.ts",
-                    "tests/scheduler.test.ts",
-                    "src/scheduler/",
-                    *stage.path_hints,
-                )
-            )
-        )
+        hints = tuple(dict.fromkeys((*_scheduler_context, *stage.path_hints)))
         stage = replace(
             stage,
             path_hints=hints,
