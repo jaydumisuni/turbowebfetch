@@ -41,7 +41,7 @@ for stage in codeops_staged_trial.STAGES:
                 "src/tools/fetch.ts",
                 "src/types.ts",
             ),
-            path_prefixes=("src/scheduler/", "src/utils/"),
+            path_prefixes=("src/scheduler/", "src/utils/", "tests/"),
             max_corrections=3,
         )
     elif stage.id in {"batch-integration", "challenge-hardening"}:
@@ -50,6 +50,7 @@ for stage in codeops_staged_trial.STAGES:
                 (
                     "src/utils/scheduler.ts",
                     "src/utils/scheduler.test.ts",
+                    "tests/scheduler.test.ts",
                     "src/scheduler/",
                     *stage.path_hints,
                 )
@@ -58,7 +59,7 @@ for stage in codeops_staged_trial.STAGES:
         stage = replace(
             stage,
             path_hints=hints,
-            path_prefixes=("src/scheduler/", "src/utils/"),
+            path_prefixes=("src/scheduler/", "src/utils/", "tests/"),
         )
     _reviewed_stages.append(stage)
 
