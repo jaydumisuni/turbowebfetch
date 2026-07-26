@@ -13,7 +13,7 @@ permissions:
 jobs:
   codeops-codes:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Checkout clean mission branch
         uses: actions/checkout@v4
@@ -34,277 +34,15 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install --no-deps --no-build-isolation 'git+https://github.com/jaydumisuni/hunter-codeops.git@main'
           python -m pip install --no-deps --no-build-isolation 'git+https://github.com/jaydumisuni/Sergeant.git@main'
-      - name: Let CodeOps generate, apply, correct, and prove the feature
+      - name: Let CodeOps author, correct, and prove every stage
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TRIAL_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           TRIAL_RUN_ID: ${{ github.run_id }}
         run: |
-          python - <<'PY'
-          from __future__ import annotations
-
-          import hashlib
-          import json
-          import os
-          import subprocess
-          import urllib.error
-          import urllib.request
-          from pathlib import Path
-          from typing import Any
-
-          from hunter_codeops.code_ops_coding import (
-              dry_run_generated_plan,
-              execute_generated_plan,
-              generate_coding_plan,
-          )
-          from hunter_codeops.code_ops_provider import (
-              ProviderExecutionError,
-              ProviderExecutionResult,
-          )
-          from hunter_codeops.code_ops_switcher import (
-              ClientKind,
-              ClientRoute,
-              CodeOpsSwitchDecision,
-              ProviderKind,
-              ProviderRoute,
-          )
-          from hunter_codeops.language_mastery_assessment import assess_language_mastery
-          from hunter_codeops.language_mastery_models import LanguageId
-
-          root = Path.cwd().resolve()
-          objective = """
-          Starting only from this clean repository and its own authority files, implement a
-          production-quality fair, abortable browser-task scheduler and integrate it into
-          the batch-fetch path.
-
-          Required behaviour:
-          - enforce configurable global and per-domain concurrency limits;
-          - preserve FIFO ordering inside each domain while preventing one busy domain from
-            starving other domains;
-          - support AbortSignal cancellation and queue-wait timeout before execution;
-          - release scheduler capacity exactly once after success, cancellation, timeout,
-            or a worker exception;
-          - replace fixed batch chunk barriers with dynamic scheduling while preserving
-            input result order;
-          - coalesce duplicate URLs without changing the output order or output count;
-          - isolate an unexpected worker failure so remaining batch work can finish;
-          - preserve the existing token-bucket rate limiter and internal Python process
-            semaphore as separate safety boundaries;
-          - add deterministic tests that do not launch Chrome, including mixed-domain load,
-            cancellation/timeout, thrown-worker release, ordering, duplicates, and a stress
-            case with at least forty tasks across at least four domains;
-          - make repository lint, strict TypeScript checking, non-interactive tests, and the
-            production build pass without weakening those proof gates.
-
-          Keep the patch focused. Do not edit GitHub workflows, generated lockfiles, licence
-          files, or unrelated product documentation. Return the strict CodeOps JSON patch
-          proposal only. You own the initial implementation and every correction generated
-          from failed proof; no human-authored production patch will be supplied.
-          """.strip()
-
-          token = os.environ.get("GITHUB_TOKEN", "")
-          if not token:
-              raise SystemExit("GITHUB_TOKEN is unavailable")
-
-          model = "openai/gpt-4.1"
-          endpoint = "https://models.github.ai/inference/chat/completions"
-          provider_calls: list[dict[str, Any]] = []
-
-          route = ProviderRoute(
-              id="github-models-gpt-4.1",
-              kind=ProviderKind.CUSTOM,
-              model=model,
-              endpoint=endpoint,
-              local=False,
-              credential_env="GITHUB_TOKEN",
-              capabilities=("repo_patch",),
-              notes="GitHub Models hosted coding trial",
-          )
-          decision = CodeOpsSwitchDecision(
-              provider=route,
-              client=ClientRoute("grandmaster-live-trial", ClientKind.TERMINAL),
-              mode="repo_patch",
-              review_required=True,
-              reason="CodeOps must author and prove a difficult real-repository change",
-          )
-
-          def sha256_text(value: str) -> str:
-              return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-          def github_models_executor(
-              selected: CodeOpsSwitchDecision,
-              task: str,
-              *,
-              system_prompt: str,
-              timeout: float = 300.0,
-          ) -> ProviderExecutionResult:
-              call_number = len(provider_calls) + 1
-              body = {
-                  "model": selected.provider.model,
-                  "messages": [
-                      {"role": "system", "content": system_prompt},
-                      {"role": "user", "content": task},
-                  ],
-                  "temperature": 0.1,
-                  "max_tokens": 12000,
-              }
-              request_text = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
-              request = urllib.request.Request(
-                  selected.provider.endpoint,
-                  data=request_text.encode("utf-8"),
-                  headers={
-                      "Accept": "application/vnd.github+json",
-                      "Authorization": f"Bearer {token}",
-                      "Content-Type": "application/json",
-                      "X-GitHub-Api-Version": "2026-03-10",
-                  },
-                  method="POST",
-              )
-              try:
-                  with urllib.request.urlopen(request, timeout=timeout) as response:
-                      response_text = response.read().decode("utf-8")
-              except urllib.error.HTTPError as exc:
-                  detail = exc.read().decode("utf-8", errors="replace")[-4000:]
-                  raise ProviderExecutionError(
-                      f"GitHub Models request {call_number} failed with HTTP {exc.code}: {detail}"
-                  ) from exc
-              except urllib.error.URLError as exc:
-                  raise ProviderExecutionError(
-                      f"GitHub Models request {call_number} failed: {exc}"
-                  ) from exc
-
-              try:
-                  payload = json.loads(response_text)
-                  content = payload["choices"][0]["message"]["content"]
-              except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-                  raise ProviderExecutionError(
-                      f"GitHub Models request {call_number} returned an unsupported response"
-                  ) from exc
-              if not isinstance(content, str) or not content.strip():
-                  raise ProviderExecutionError(
-                      f"GitHub Models request {call_number} returned empty content"
-                  )
-              provider_calls.append(
-                  {
-                      "call": call_number,
-                      "model": selected.provider.model,
-                      "request_sha256": sha256_text(request_text),
-                      "response_sha256": sha256_text(response_text),
-                      "output_sha256": sha256_text(content),
-                      "output_chars": len(content),
-                      "finish_reason": payload.get("choices", [{}])[0].get("finish_reason"),
-                      "usage": payload.get("usage", {}),
-                  }
-              )
-              return ProviderExecutionResult(
-                  provider_id=selected.provider.id,
-                  model=selected.provider.model,
-                  output_text=content,
-                  raw={
-                      "provider": "github-models",
-                      "call": call_number,
-                      "response_sha256": sha256_text(response_text),
-                  },
-              )
-
-          plan = generate_coding_plan(
-              decision,
-              objective,
-              root,
-              operation_id="grandmaster-live-provider-trial-1",
-              executor=github_models_executor,
-              timeout=300.0,
-          )
-
-          blocked = []
-          allowed_roots = ("src/", "docs/")
-          allowed_files = {
-              "package.json",
-              "tsconfig.json",
-              ".eslintrc.cjs",
-              ".eslintrc.js",
-              "eslint.config.js",
-              "eslint.config.mjs",
-              "vitest.config.ts",
-          }
-          for operation in plan.proposal.operations:
-              path = operation.path
-              if path.startswith(".github/") or path.endswith("package-lock.json"):
-                  blocked.append(path)
-              elif not path.startswith(allowed_roots) and path not in allowed_files:
-                  blocked.append(path)
-          if blocked:
-              raise SystemExit(f"CodeOps generated changes outside the approved trial scope: {blocked}")
-
-          dry_run = dry_run_generated_plan(root, plan)
-          execution = execute_generated_plan(
-              decision,
-              plan,
-              approved=True,
-              max_corrections=3,
-              executor=github_models_executor,
-          )
-
-          changed_files = tuple(execution.changed_files)
-          Path("codeops-live-changed-files.txt").write_text(
-              "\n".join(changed_files) + "\n",
-              encoding="utf-8",
-          )
-          diff = subprocess.run(
-              ["git", "diff", "--binary", "--", *changed_files],
-              cwd=root,
-              text=True,
-              capture_output=True,
-              check=True,
-          ).stdout
-          Path("codeops-live-generated.patch").write_text(diff, encoding="utf-8")
-
-          assessment = assess_language_mastery(
-              LanguageId.TYPESCRIPT,
-              root,
-              (),
-              changed_files=changed_files,
-          )
-          evidence = {
-              "classification": "codeops_live_provider_authored_trial",
-              "repository": os.environ.get("GITHUB_REPOSITORY"),
-              "trial_head_sha": os.environ.get("TRIAL_HEAD_SHA"),
-              "workflow_run_id": os.environ.get("TRIAL_RUN_ID"),
-              "operation_id": plan.operation_id,
-              "objective_sha256": sha256_text(objective),
-              "provider": {
-                  "id": route.id,
-                  "model": route.model,
-                  "endpoint": route.endpoint,
-                  "live_provider": True,
-                  "calls": provider_calls,
-              },
-              "plan": plan.to_dict(),
-              "dry_run": dry_run,
-              "execution": execution.to_dict(),
-              "generated_diff_sha256": sha256_text(diff),
-              "assessment": assessment.to_dict(),
-              "human_authored_production_code": False,
-              "grand_master_claim": False,
-          }
-          Path("codeops-live-trial-evidence.json").write_text(
-              json.dumps(evidence, indent=2, sort_keys=True),
-              encoding="utf-8",
-          )
-          print(json.dumps(evidence, indent=2, sort_keys=True))
-
-          if execution.status != "ready_for_sergeant_review":
-              raise SystemExit(f"CodeOps did not finish coding successfully: {execution.status}")
-          if execution.restored:
-              raise SystemExit("CodeOps restored the workspace after failed proof")
-          if not diff.strip():
-              raise SystemExit("CodeOps produced no repository changes")
-          if not provider_calls:
-              raise SystemExit("No live coding-provider call was recorded")
-          if assessment.mastered:
-              raise SystemExit("One trial must never promote a language to mastery")
-          PY
-      - name: Run independent Sergeant review on generated code
+          python .github/codeops_staged_trial.py 2>&1 | tee codeops-live-trial.log
+          test ${PIPESTATUS[0]} -eq 0
+      - name: Run independent Sergeant review on generated product code
         run: |
           sergeant pr-review "$GITHUB_WORKSPACE" \
             --file-list codeops-live-changed-files.txt \
@@ -313,19 +51,19 @@ jobs:
           import json
           from pathlib import Path
 
-          packet = json.loads(Path("sergeant-live-provider-review.json").read_text(encoding="utf-8"))
-          verdict = packet.get("verdict", {})
+          packet = json.loads(Path('sergeant-live-provider-review.json').read_text(encoding='utf-8'))
+          verdict = packet.get('verdict', {})
           summary = {
-              "verdict": verdict.get("verdict"),
-              "confidence": verdict.get("confidence"),
-              "reason": verdict.get("reason"),
-              "required_actions": verdict.get("required_actions", []),
-              "officer_verdict": packet.get("officer_council", {}).get("verdict"),
-              "cpl_status": packet.get("cpl_review", {}).get("status"),
+              'verdict': verdict.get('verdict'),
+              'confidence': verdict.get('confidence'),
+              'reason': verdict.get('reason'),
+              'required_actions': verdict.get('required_actions', []),
+              'officer_verdict': packet.get('officer_council', {}).get('verdict'),
+              'cpl_status': packet.get('cpl_review', {}).get('status'),
           }
           print(json.dumps(summary, indent=2, sort_keys=True))
-          if verdict.get("verdict") != "APPROVE" or verdict.get("required_actions"):
-              raise SystemExit("Sergeant did not approve the CodeOps-generated implementation")
+          if verdict.get('verdict') != 'APPROVE' or verdict.get('required_actions'):
+              raise SystemExit('Sergeant did not approve the CodeOps-authored implementation')
           PY
       - name: Upload complete live-provider coding evidence
         if: always()
@@ -334,8 +72,10 @@ jobs:
           name: codeops-live-provider-coding-trial
           path: |
             codeops-live-trial-evidence.json
+            codeops-live-trial.log
             codeops-live-generated.patch
             codeops-live-changed-files.txt
             sergeant-live-provider-review.json
+            codeops-staged-evidence/
           if-no-files-found: warn
           retention-days: 30
