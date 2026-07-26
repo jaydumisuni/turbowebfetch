@@ -54,6 +54,16 @@ def compress_codeops_task(
             "Do not invent parallel modules when an existing repository interface satisfies the objective; modify or import the recovered canonical files.",
         )
     )
+    objective = str(payload.get("objective", "")).lower()
+    if "proof surface" in objective:
+        rules.extend(
+            (
+                "Use only installed ESLint configurations and plugins. Do not extend prettier or any package absent from package.json.",
+                "Use correctness-focused eslint:recommended and @typescript-eslint recommended rules compatible with the existing source. Do not enable type-aware strict, stylistic, quote, indent, comma, maximum-line-length, or formatting rules that create repository-wide churn.",
+                "Keep Vitest as the test framework and make the existing test script run Vitest non-interactively; do not replace it with Node's test runner.",
+                "Inspect the recovered rate limiter source and include any necessary real correctness lint fix in the initial proposal so later corrections do not require new file scope.",
+            )
+        )
 
     hint_order = {path: index for index, path in enumerate(path_hints)}
 
