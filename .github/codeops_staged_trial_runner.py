@@ -2,19 +2,25 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import codeops_staged_trial_entry as entry
-from hunter_codeops.code_ops_coding_models import CodingPatchProposal
+from hunter_codeops.code_ops_coding_models import CodingPatchProposal, ProofResult
 from hunter_codeops.code_ops_file_edit import FileEditAction, FileEditOperation
-from hunter_codeops.code_ops_repository import discover_proof_commands, source_hashes
+from hunter_codeops.code_ops_repository import (
+    discover_proof_commands,
+    run_proof_commands,
+    source_hashes,
+)
 
 _last_provider_call_at = 0.0
 _original_route = entry.codeops_staged_trial.route
 _original_generate = entry.codeops_staged_trial.generate_coding_plan
+_original_execute = entry.codeops_staged_trial.execute_generated_plan
 _original_initial_rules = entry._initial_rules
 _SCOPE_MARKER = "__HUNTER_CODEOPS_PREAPPROVED_SCOPE_RESERVATION__"
 
@@ -57,7 +63,6 @@ def _paced_provider_call(self, *args, **kwargs):
 
 
 def _fallback_route():
-    """Use a separately rate-limited GitHub Models coding route."""
     decision = _original_route()
     provider = replace(
         decision.provider,
@@ -105,7 +110,6 @@ def _approved_scope(operation_id: str) -> tuple[str, ...]:
 
 
 def _generate_with_preapproved_correction_scope(*args, **kwargs):
-    """Reserve AgentOps-approved files without changing product content."""
     plan = _original_generate(*args, **kwargs)
     approved = _approved_scope(plan.operation_id)
     existing = set(plan.proposal.changed_files)
@@ -122,10 +126,7 @@ def _generate_with_preapproved_correction_scope(*args, **kwargs):
     )
     if not reservations:
         return plan
-    proposal = replace(
-        plan.proposal,
-        operations=plan.proposal.operations + reservations,
-    )
+    proposal = replace(plan.proposal, operations=plan.proposal.operations + reservations)
     root = Path(plan.context.workspace)
     return replace(
         plan,
@@ -135,9 +136,52 @@ def _generate_with_preapproved_correction_scope(*args, **kwargs):
     )
 
 
+def _proof_runner_with_eslint_fix(workspace, commands):
+    root = Path(workspace)
+    completed = subprocess.run(
+        [
+            "npx",
+            "eslint",
+            "--fix",
+            "--config",
+            ".eslintrc.cjs",
+            "src/rate-limit/limiter.ts",
+        ],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        timeout=180,
+        check=False,
+    )
+    output = (completed.stdout or "") + (completed.stderr or "")
+    fix_result = ProofResult(
+        name="eslint-autofix:src/rate-limit/limiter.ts",
+        argv=(
+            "npx",
+            "eslint",
+            "--fix",
+            "--config",
+            ".eslintrc.cjs",
+            "src/rate-limit/limiter.ts",
+        ),
+        cwd=".",
+        returncode=completed.returncode,
+        passed=completed.returncode == 0,
+        output=output,
+    )
+    return (fix_result,) + run_proof_commands(root, commands)
+
+
+def _execute_with_approved_tools(decision, plan, **kwargs):
+    if "proof-gates" in plan.operation_id:
+        kwargs["proof_runner"] = _proof_runner_with_eslint_fix
+    return _original_execute(decision, plan, **kwargs)
+
+
 entry.codeops_live_provider.GitHubModelsExecutor.__call__ = _paced_provider_call
 entry.codeops_staged_trial.route = _fallback_route
 entry.codeops_staged_trial.generate_coding_plan = _generate_with_preapproved_correction_scope
+entry.codeops_staged_trial.execute_generated_plan = _execute_with_approved_tools
 entry._initial_rules = _compact_proof_rules
 
 
