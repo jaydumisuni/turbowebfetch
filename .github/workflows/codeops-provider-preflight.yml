@@ -1,0 +1,91 @@
+name: codeops-provider-preflight
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  models: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test GitHub Models transport
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY' 2>&1 | tee codeops-provider-preflight.log
+          import hashlib
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          body = {
+              "model": "openai/gpt-4.1",
+              "messages": [
+                  {"role": "system", "content": "Return valid JSON only."},
+                  {"role": "user", "content": "Return exactly this JSON object: {\"ok\":true}"},
+              ],
+              "temperature": 0,
+              "max_tokens": 128,
+          }
+          request_text = json.dumps(body, separators=(",", ":"))
+          request = urllib.request.Request(
+              "https://models.github.ai/inference/chat/completions",
+              data=request_text.encode(),
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+                  "Content-Type": "application/json",
+                  "X-GitHub-Api-Version": "2026-03-10",
+              },
+              method="POST",
+          )
+          evidence = {
+              "model": body["model"],
+              "request_sha256": hashlib.sha256(request_text.encode()).hexdigest(),
+          }
+          try:
+              with urllib.request.urlopen(request, timeout=120) as response:
+                  response_text = response.read().decode()
+              payload = json.loads(response_text)
+              evidence.update({
+                  "status": "success",
+                  "response_sha256": hashlib.sha256(response_text.encode()).hexdigest(),
+                  "finish_reason": payload.get("choices", [{}])[0].get("finish_reason"),
+                  "content": payload.get("choices", [{}])[0].get("message", {}).get("content"),
+                  "usage": payload.get("usage", {}),
+              })
+          except urllib.error.HTTPError as exc:
+              evidence.update({
+                  "status": "http_error",
+                  "http_status": exc.code,
+                  "detail": exc.read().decode(errors="replace")[-4000:],
+              })
+          except Exception as exc:
+              evidence.update({"status": "error", "detail": repr(exc)})
+          Path("codeops-provider-preflight.json").write_text(
+              json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8"
+          )
+          print(json.dumps(evidence, indent=2, sort_keys=True))
+          if evidence["status"] != "success":
+              raise SystemExit(1)
+          PY
+          test ${PIPESTATUS[0]} -eq 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: codeops-provider-preflight
+          path: |
+            codeops-provider-preflight.json
+            codeops-provider-preflight.log
+          if-no-files-found: warn
+          retention-days: 7
