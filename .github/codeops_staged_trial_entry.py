@@ -10,7 +10,7 @@ _original_compress = codeops_live_provider.compress_codeops_task
 
 
 def _compress_with_nodenext_rule(task: str, **kwargs):
-    """Add a repository-wide module-resolution rule to the provider contract."""
+    """Add repository-wide module and initial-scope rules to the provider contract."""
     payload = json.loads(task)
     rules = payload.get("rules")
     if not isinstance(rules, list):
@@ -19,6 +19,11 @@ def _compress_with_nodenext_rule(task: str, **kwargs):
     rules.append(
         "This repository uses NodeNext. Every relative import written in TypeScript, including tests, must use the runtime .js extension."
     )
+    objective = str(payload.get("objective", "")).lower()
+    if "proof surface" in objective:
+        rules.append(
+            "The initial proposal must include src/rate-limit/limiter.test.ts with deterministic Vitest assertions for confirmed extractDomain behaviour. Do not defer this test file to a correction pass because corrections cannot expand the approved file scope."
+        )
     return _original_compress(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
         **kwargs,
@@ -41,7 +46,19 @@ _scheduler_context = (
 
 _reviewed_stages = []
 for stage in codeops_staged_trial.STAGES:
-    if stage.id == "scheduler-core":
+    if stage.id == "proof-gates":
+        stage = replace(
+            stage,
+            path_hints=(
+                "package.json",
+                "src/rate-limit/limiter.ts",
+                "src/rate-limit/limiter.test.ts",
+                "tsconfig.json",
+                "src/tools/fetch-batch.ts",
+            ),
+            max_corrections=3,
+        )
+    elif stage.id == "scheduler-core":
         stage = replace(
             stage,
             path_hints=(
