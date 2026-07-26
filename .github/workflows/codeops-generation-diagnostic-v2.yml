@@ -1,0 +1,125 @@
+name: codeops-generation-diagnostic-v2
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  models: read
+
+jobs:
+  diagnose-bounded-generation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install repository and CodeOps
+        run: |
+          npm ci --ignore-scripts
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install --no-deps --no-build-isolation 'git+https://github.com/jaydumisuni/hunter-codeops.git@main'
+      - name: Generate a bounded live-provider CodeOps plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY' 2>&1 | tee codeops-generation-diagnostic-v2.log
+          from __future__ import annotations
+
+          import json
+          import os
+          import sys
+          import traceback
+          from pathlib import Path
+
+          from hunter_codeops.code_ops_coding import generate_coding_plan
+          from hunter_codeops.code_ops_switcher import (
+              ClientKind, ClientRoute, CodeOpsSwitchDecision, ProviderKind, ProviderRoute
+          )
+
+          root = Path.cwd().resolve()
+          sys.path.insert(0, str(root / ".github"))
+          from codeops_live_provider import GitHubModelsExecutor
+
+          objective = """
+          Starting only from this clean repository, implement a production-quality fair,
+          abortable browser-task scheduler integrated into batch fetch. Enforce global and
+          per-domain concurrency, FIFO within domains, cross-domain fairness, queued
+          cancellation and timeout, exactly-once release after worker failure, dynamic batch
+          scheduling, duplicate URL coalescing with original result order, worker-failure
+          isolation, and deterministic Chrome-free tests including at least forty tasks over
+          four domains. Preserve the token bucket and Python process semaphore. Make lint,
+          strict TypeScript, non-interactive tests, and production build pass. Do not edit
+          workflows, lockfiles, licences, or unrelated files. Return the strict CodeOps JSON
+          patch proposal only; you own the implementation and tests.
+          """.strip()
+          route = ProviderRoute(
+              id="github-models-gpt-4.1",
+              kind=ProviderKind.CUSTOM,
+              model="openai/gpt-4.1",
+              endpoint="https://models.github.ai/inference/chat/completions",
+              credential_env="GITHUB_TOKEN",
+              capabilities=("repo_patch",),
+          )
+          decision = CodeOpsSwitchDecision(
+              provider=route,
+              client=ClientRoute("bounded-generation-diagnostic", ClientKind.TERMINAL),
+              mode="repo_patch",
+              review_required=True,
+              reason="prove live provider can author the CodeOps patch",
+          )
+          output = root / "codeops-generation-v2"
+          executor = GitHubModelsExecutor(os.environ["GITHUB_TOKEN"], output)
+          result = {"status": "unknown"}
+          exit_code = 0
+          try:
+              plan = generate_coding_plan(
+                  decision,
+                  objective,
+                  root,
+                  operation_id="grandmaster-live-provider-diagnostic-v2",
+                  executor=executor,
+                  timeout=300.0,
+              )
+              result.update({
+                  "status": "plan_generated",
+                  "calls": executor.calls,
+                  "plan": plan.to_dict(),
+              })
+          except Exception as exc:
+              result.update({
+                  "status": "generation_failed",
+                  "calls": executor.calls,
+                  "error_type": type(exc).__name__,
+                  "error": str(exc),
+                  "traceback": traceback.format_exc(),
+              })
+              exit_code = 1
+          Path("codeops-generation-diagnostic-v2.json").write_text(
+              json.dumps(result, indent=2, sort_keys=True), encoding="utf-8"
+          )
+          print(json.dumps(result, indent=2, sort_keys=True))
+          raise SystemExit(exit_code)
+          PY
+          test ${PIPESTATUS[0]} -eq 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: codeops-generation-diagnostic-v2
+          path: |
+            codeops-generation-diagnostic-v2.json
+            codeops-generation-diagnostic-v2.log
+            codeops-generation-v2/
+          if-no-files-found: warn
+          retention-days: 14
