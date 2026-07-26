@@ -1,12 +1,21 @@
 /**
- * Tool exports for the TurboFetch MCP Server
+ * Tool exports for the TurboFetch MCP Server.
  *
- * This module exports the main fetch functions that implement
- * the MCP tool handlers.
+ * Public fetch operations pass through the fair scheduler. The underlying raw
+ * fetch implementation remains available only through an explicit compatibility
+ * export from fetch-scheduled.ts.
  */
 
-// Single URL fetch
-export { fetchPage, fetch } from "./fetch.js";
+export {
+  fetchPage,
+  fetch,
+  getProcessSchedulerStats,
+  fetchWithoutFairScheduling,
+} from "./fetch-scheduled.js";
 
-// Batch URL fetch
-export { fetchBatch, fetchMultiple, fetchBatchWithProgress } from "./fetch-batch.js";
+export {
+  fetchBatch,
+  fetchMultiple,
+  fetchBatchWithProgress,
+  fetchBatchWithWorker,
+} from "./fetch-batch.js";
