@@ -99,6 +99,7 @@ def compress_codeops_task(
                 "This is a correction pass. Fix only the currently failing proof evidence; do not restate or redesign the original solution.",
                 "Preserve every proof gate that already passed. Do not modify its configuration or source unless the current failure explicitly names that file as the cause.",
                 "Use the smallest possible operation set, usually one exact replace in the file named by the failure.",
+                "When a lint failure names an intentionally unused underscore-prefixed variable outside the approved source scope, correct the no-unused-vars configuration instead of requesting or editing that source file.",
             )
         )
     objective = str(payload.get("objective", "")).lower()
@@ -107,11 +108,13 @@ def compress_codeops_task(
             (
                 "Use only installed ESLint configurations and plugins. Do not extend prettier or any package absent from package.json.",
                 "Use correctness-focused eslint:recommended and @typescript-eslint recommended rules compatible with the existing source. Do not enable type-aware strict, stylistic, quote, indent, comma, maximum-line-length, or formatting rules that create repository-wide churn.",
+                "Do not manually enable rules requiring parserServices or parserOptions.project, including no-floating-promises, no-misused-promises, no-unsafe-* rules, await-thenable, restrict-plus-operands, restrict-template-expressions, or unbound-method.",
+                "Configure @typescript-eslint/no-unused-vars to ignore underscore-prefixed arguments, variables, and caught errors using argsIgnorePattern, varsIgnorePattern, and caughtErrorsIgnorePattern set to ^_.",
                 "Keep Vitest as the test framework and make the existing test script run Vitest non-interactively; do not replace it with Node's test runner.",
                 "All relative TypeScript test imports must use the explicit .js extension required by this NodeNext repository.",
-                "Proof tests must assert confirmed existing public behaviour. Do not introduce an assertion that requires changing public behaviour merely to satisfy the test.",
-                "For src/rate-limit/limiter.ts, preserve every existing export, class method, configuration, and behaviour. Use only minimal exact replace operations for real lint defects; do not write a replacement copy of the file.",
-                "Inspect the recovered rate limiter source and include any necessary real correctness lint fix in the initial proposal so later corrections do not require new file scope.",
+                "Proof tests must assert confirmed existing public behaviour. Do not introduce an assertion that requires changing public behaviour merely to satisfy the test. In particular, do not assert that the string 'not a url' throws because the existing schemeless fallback accepts a leading hostname token.",
+                "For src/rate-limit/limiter.ts, preserve every existing export, class method, configuration, and behaviour. The only expected source correction is a minimal exact replacement removing the unnecessary slash escape identified by no-useless-escape; do not alter token-bucket logic or write a replacement copy of the file.",
+                "Include that minimal regex correction in the initial proposal so later corrections do not require new file scope.",
             )
         )
 
