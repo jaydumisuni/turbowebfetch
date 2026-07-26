@@ -71,17 +71,55 @@ jobs:
           if verdict.get('verdict') != 'APPROVE' or verdict.get('required_actions'):
               raise SystemExit('Sergeant did not approve the CodeOps-authored implementation')
           PY
+      - name: Prepare guaranteed evidence bundle
+        if: always()
+        run: |
+          mkdir -p trial-artifact
+          for file in \
+            codeops-live-trial-evidence.json \
+            codeops-live-trial.log \
+            codeops-live-generated.patch \
+            codeops-live-changed-files.txt \
+            sergeant-live-provider-review.json; do
+            if [ -f "$file" ]; then cp "$file" trial-artifact/; fi
+          done
+          if [ -d codeops-staged-evidence ]; then
+            cp -R codeops-staged-evidence trial-artifact/
+          fi
+          if [ -f codeops-live-trial.log ]; then
+            tail -n 300 codeops-live-trial.log > trial-artifact/failure-tail.log
+          else
+            printf '%s\n' 'CodeOps trial log was not created.' > trial-artifact/failure-tail.log
+          fi
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          source = Path('codeops-live-trial-evidence.json')
+          summary = {'status': 'evidence_file_missing'}
+          if source.is_file():
+              packet = json.loads(source.read_text(encoding='utf-8'))
+              summary = {
+                  'status': packet.get('status'),
+                  'classification': packet.get('classification'),
+                  'failed_stage': next(
+                      (stage.get('stage') for stage in packet.get('stages', []) if stage.get('status') == 'failed'),
+                      None,
+                  ),
+                  'error': packet.get('error'),
+                  'stage_count': len(packet.get('stages', [])),
+              }
+          Path('trial-artifact/summary.json').write_text(
+              json.dumps(summary, indent=2, sort_keys=True), encoding='utf-8'
+          )
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+          find trial-artifact -maxdepth 4 -type f -print | sort
       - name: Upload complete live-provider coding evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: codeops-live-provider-coding-trial
-          path: |
-            codeops-live-trial-evidence.json
-            codeops-live-trial.log
-            codeops-live-generated.patch
-            codeops-live-changed-files.txt
-            sergeant-live-provider-review.json
-            codeops-staged-evidence/
-          if-no-files-found: warn
+          path: trial-artifact/
+          if-no-files-found: error
           retention-days: 30
