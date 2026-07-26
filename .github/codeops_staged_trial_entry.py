@@ -54,9 +54,9 @@ def _compress_with_nodenext_rule(task: str, **kwargs):
         rules.extend(
             (
                 "The initial proposal must include src/rate-limit/limiter.test.ts with deterministic Vitest assertions for confirmed extractDomain behaviour. Do not defer this test file to a correction pass because corrections cannot expand the approved file scope.",
-                "Ground extractDomain tests in observed current behaviour: full http/https URLs and schemeless hostnames without a port are valid; uppercase full URLs are lowercased.",
-                "Do not assert extractDomain('sub.example.com:3000') returns sub.example.com because URL parsing treats the prefix as a non-http scheme and currently returns an empty hostname.",
-                "Do not assert extractDomain('http://') throws because the fallback currently accepts it as hostname 'http'. Use only confirmed invalid inputs such as the empty string, whitespace-only input, or '://:'.",
+                "Keep the extractDomain test fixture deliberately small and stable. Test only these confirmed cases: https://www.Example.com/path -> www.example.com; http://sub.domain.com -> sub.domain.com; example.com -> example.com; WWW.EXAMPLE.COM -> www.example.com; and throws for the empty string, whitespace-only input, and ://:.",
+                "Do not add any other extractDomain cases, including ports, query strings, scheme-only strings, schemeless paths, or speculative malformed URL behaviour.",
+                "Import extractDomain from ./limiter.js and never change that already-correct NodeNext import during a correction pass.",
             )
         )
     if "scheduler core" in objective:
