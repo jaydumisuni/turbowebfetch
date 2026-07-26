@@ -11,6 +11,8 @@ from typing import Any, Sequence
 from hunter_codeops.code_ops_provider import ProviderExecutionError, ProviderExecutionResult
 from hunter_codeops.code_ops_switcher import CodeOpsSwitchDecision
 
+from codeops_patch_normalizer import normalize_provider_patch
+
 
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -204,37 +206,50 @@ class GitHubModelsExecutor:
 
         try:
             payload = json.loads(response_text)
-            content = payload["choices"][0]["message"]["content"]
+            raw_content = payload["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             raise ProviderExecutionError(
                 f"GitHub Models call {number} returned an unsupported response"
             ) from exc
-        if not isinstance(content, str) or not content.strip():
+        if not isinstance(raw_content, str) or not raw_content.strip():
             raise ProviderExecutionError(f"GitHub Models call {number} returned empty content")
 
         (self.output_directory / f"provider-output-{number}.txt").write_text(
-            content, encoding="utf-8"
+            raw_content, encoding="utf-8"
         )
+        normalized_content, normalizations = normalize_provider_patch(
+            raw_content,
+            Path.cwd(),
+        )
+        if normalized_content != raw_content:
+            (self.output_directory / f"provider-output-{number}-normalized.txt").write_text(
+                normalized_content, encoding="utf-8"
+            )
+
         call = {
             "call": number,
             "model": selected.provider.model,
             "request_sha256": _sha256(request_text),
             "response_sha256": _sha256(response_text),
-            "output_sha256": _sha256(content),
-            "output_chars": len(content),
+            "raw_output_sha256": _sha256(raw_content),
+            "output_sha256": _sha256(normalized_content),
+            "raw_output_chars": len(raw_content),
+            "output_chars": len(normalized_content),
             "finish_reason": payload.get("choices", [{}])[0].get("finish_reason"),
             "usage": payload.get("usage", {}),
             "context": context_metadata,
             "max_output_tokens": self.max_output_tokens,
+            "normalizations": normalizations,
         }
         self.calls.append(call)
         return ProviderExecutionResult(
             provider_id=selected.provider.id,
             model=selected.provider.model,
-            output_text=content,
+            output_text=normalized_content,
             raw={
                 "provider": "github-models",
                 "call": number,
                 "response_sha256": call["response_sha256"],
+                "normalizations": normalizations,
             },
         )
