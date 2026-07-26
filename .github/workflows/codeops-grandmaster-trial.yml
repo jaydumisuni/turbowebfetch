@@ -1,0 +1,155 @@
+name: codeops-grandmaster-trial
+
+on:
+  pull_request:
+  push:
+    branches:
+      - trial/codeops-grandmaster-scheduler
+
+permissions:
+  contents: read
+
+jobs:
+  codeops-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout trial repository
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install repository and CodeOps
+        run: |
+          npm ci --ignore-scripts
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install --no-deps --no-build-isolation 'git+https://github.com/jaydumisuni/hunter-codeops.git@main'
+      - name: Run CodeOps repository recovery and proof
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          from hunter_codeops.code_ops_repository import (
+              discover_proof_commands,
+              recover_repository_context,
+              run_proof_commands,
+          )
+          from hunter_codeops.language_mastery_assessment import assess_language_mastery
+          from hunter_codeops.language_mastery_models import LanguageId
+
+          root = Path.cwd().resolve()
+          changed = (
+              'src/scheduler/fair-scheduler.ts',
+              'src/scheduler/fair-scheduler.test.ts',
+              'src/tools/fetch-scheduled.ts',
+              'src/tools/fetch-batch.ts',
+              'src/tools/fetch-batch.test.ts',
+              'src/tools/index.ts',
+          )
+          objective = (
+              'Add a fair abortable browser scheduler with global and per-domain '
+              'concurrency, queue timeouts, idempotent release, dynamic batch '
+              'scheduling, order preservation, and worker-crash isolation.'
+          )
+          context = recover_repository_context(root, objective)
+          commands = discover_proof_commands(root, changed)
+          results = run_proof_commands(root, commands)
+          assessment = assess_language_mastery(
+              LanguageId.TYPESCRIPT,
+              root,
+              (),
+              changed_files=changed,
+          )
+          evidence = {
+              'classification': 'assistant_provider_plus_codeops_engine_trial',
+              'live_provider': False,
+              'grand_master_claim': False,
+              'objective': objective,
+              'context': context.summary_dict(),
+              'commands': [command.to_dict() for command in commands],
+              'results': [result.to_dict() for result in results],
+              'assessment': assessment.to_dict(),
+          }
+          Path('codeops-trial-evidence.json').write_text(
+              json.dumps(evidence, indent=2, sort_keys=True),
+              encoding='utf-8',
+          )
+          print(json.dumps(evidence, indent=2, sort_keys=True))
+          if not commands or len(results) != len(commands) or not all(item.passed for item in results):
+              raise SystemExit(1)
+          if assessment.mastered:
+              raise SystemExit('A single trial must never claim language mastery')
+          PY
+      - name: Upload CodeOps evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeops-grandmaster-trial
+          path: codeops-trial-evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  sergeant-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout complete PR history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Sergeant
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install --no-deps --no-build-isolation 'git+https://github.com/jaydumisuni/Sergeant.git@main'
+      - name: Resolve changed files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" > changed-files.txt
+          test -s changed-files.txt
+          cat changed-files.txt
+      - name: Run independent Sergeant review
+        run: sergeant pr-review "$GITHUB_WORKSPACE" --file-list changed-files.txt --pretty > sergeant-review.json
+      - name: Enforce Sergeant verdict
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          packet = json.loads(Path('sergeant-review.json').read_text(encoding='utf-8'))
+          verdict = packet.get('verdict', {})
+          value = verdict.get('verdict', 'UNKNOWN')
+          actions = verdict.get('required_actions', [])
+          print(json.dumps({
+              'verdict': value,
+              'confidence': verdict.get('confidence'),
+              'reason': verdict.get('reason'),
+              'required_actions': actions,
+              'officer_verdict': packet.get('officer_council', {}).get('verdict'),
+          }, indent=2, sort_keys=True))
+          if value != 'APPROVE' or actions:
+              raise SystemExit(1)
+          PY
+      - name: Upload Sergeant evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sergeant-grandmaster-trial
+          path: |
+            sergeant-review.json
+            changed-files.txt
+          if-no-files-found: warn
+          retention-days: 14
