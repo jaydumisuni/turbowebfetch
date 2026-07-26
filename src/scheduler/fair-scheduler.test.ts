@@ -114,6 +114,68 @@ describe("FairTaskScheduler", () => {
     expect(scheduler.stats).toMatchObject({ running: 0, queued: 0 });
   });
 
+  it("releases capacity when a scheduled task throws", async () => {
+    const scheduler = new FairTaskScheduler({
+      maxConcurrent: 1,
+      maxConcurrentPerKey: 1,
+    });
+
+    await expect(
+      scheduler.run("a.example", async () => {
+        throw new Error("worker crashed");
+      })
+    ).rejects.toThrow("worker crashed");
+
+    expect(scheduler.stats).toMatchObject({ running: 0, queued: 0 });
+    await expect(
+      scheduler.run("a.example", async () => "recovered")
+    ).resolves.toBe("recovered");
+    expect(scheduler.stats.running).toBe(0);
+  });
+
+  it("maintains limits under a sixty-task mixed-domain stress run", async () => {
+    const scheduler = new FairTaskScheduler({
+      maxConcurrent: 4,
+      maxConcurrentPerKey: 2,
+      defaultQueueTimeoutMs: 2_000,
+    });
+    let running = 0;
+    let maximumRunning = 0;
+    const activeByKey = new Map<string, number>();
+    const maximumByKey = new Map<string, number>();
+
+    const results = await Promise.all(
+      Array.from({ length: 60 }, (_, index) => {
+        const key = `domain-${index % 5}`;
+        return scheduler.run(key, async () => {
+          running += 1;
+          maximumRunning = Math.max(maximumRunning, running);
+          const active = (activeByKey.get(key) ?? 0) + 1;
+          activeByKey.set(key, active);
+          maximumByKey.set(
+            key,
+            Math.max(maximumByKey.get(key) ?? 0, active)
+          );
+
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, (index % 3) + 1);
+          });
+
+          running -= 1;
+          activeByKey.set(key, active - 1);
+          return index;
+        });
+      })
+    );
+
+    expect(results).toEqual(Array.from({ length: 60 }, (_, index) => index));
+    expect(maximumRunning).toBeLessThanOrEqual(4);
+    expect([...maximumByKey.values()].every((value) => value <= 2)).toBe(
+      true
+    );
+    expect(scheduler.stats).toMatchObject({ running: 0, queued: 0 });
+  });
+
   it("rejects queued and future work when closed", async () => {
     const scheduler = new FairTaskScheduler({
       maxConcurrent: 1,
