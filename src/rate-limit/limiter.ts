@@ -38,7 +38,7 @@ export function extractDomain(url: string): string {
     return parsed.hostname.toLowerCase();
   } catch {
     // If URL parsing fails, try to extract domain from string
-    const match = url.match(/^(?:https?:\/\/)?([^\/\s:]+)/i);
+    const match = url.match(/^(?:https?:\/\/)?([^/\s:]+)/i);
     if (match) {
       return match[1].toLowerCase();
     }
