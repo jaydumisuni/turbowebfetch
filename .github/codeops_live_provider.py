@@ -41,6 +41,18 @@ def compress_codeops_task(
     if not isinstance(raw_files, list):
         raise ProviderExecutionError("CodeOps provider repository files are invalid")
 
+    rules = payload.get("rules")
+    if not isinstance(rules, list):
+        rules = []
+        payload["rules"] = rules
+    rules.extend(
+        (
+            "Use at most one operation for any path. If a file needs multiple edits, emit one write operation containing the complete final file or one sufficiently specific replace operation.",
+            "For an ESLint configuration in this repository, use .eslintrc.cjs rather than .eslintrc.json.",
+            "Do not invent parallel modules when an existing repository interface satisfies the objective; modify or import the recovered canonical files.",
+        )
+    )
+
     hint_order = {path: index for index, path in enumerate(path_hints)}
 
     def rank(item: Any) -> tuple[int, int, str]:
