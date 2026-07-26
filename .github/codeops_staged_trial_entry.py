@@ -58,6 +58,7 @@ codeops_live_provider.compress_codeops_task = _compress_with_nodenext_rule
 import codeops_staged_trial
 
 _scheduler_context = (
+    "src/tools/scheduler.ts",
     "src/scheduler/Scheduler.ts",
     "src/scheduler/Scheduler.test.ts",
     "src/scheduler/scheduler.ts",
@@ -92,6 +93,7 @@ for stage in codeops_staged_trial.STAGES:
                 "src/tools/fetch.ts",
                 "src/types.ts",
             ),
+            exact_paths=stage.exact_paths | frozenset({"src/tools/scheduler.ts"}),
             path_prefixes=("src/scheduler/", "src/utils/", "tests/"),
             max_corrections=3,
         )
@@ -100,6 +102,7 @@ for stage in codeops_staged_trial.STAGES:
         stage = replace(
             stage,
             path_hints=hints,
+            exact_paths=stage.exact_paths | frozenset({"src/tools/scheduler.ts"}),
             path_prefixes=("src/scheduler/", "src/utils/", "tests/"),
         )
     _reviewed_stages.append(stage)
