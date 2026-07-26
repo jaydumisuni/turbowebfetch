@@ -16,8 +16,11 @@ def _compress_with_nodenext_rule(task: str, **kwargs):
     if not isinstance(rules, list):
         rules = []
         payload["rules"] = rules
-    rules.append(
-        "This repository uses NodeNext. Every relative import written in TypeScript, including tests, must use the runtime .js extension."
+    rules.extend(
+        (
+            "This repository uses NodeNext. Every relative import written in TypeScript, including tests, must use the runtime .js extension.",
+            "Never emit a replace operation whose old and new text are identical. When the named line is already correct, diagnose the remaining proof failure from the supplied evidence and current file content instead.",
+        )
     )
     objective = str(payload.get("objective", "")).lower()
     if "proof surface" in objective:
@@ -50,9 +53,9 @@ for stage in codeops_staged_trial.STAGES:
         stage = replace(
             stage,
             path_hints=(
+                "src/rate-limit/limiter.test.ts",
                 "package.json",
                 "src/rate-limit/limiter.ts",
-                "src/rate-limit/limiter.test.ts",
                 "tsconfig.json",
                 "src/tools/fetch-batch.ts",
             ),
