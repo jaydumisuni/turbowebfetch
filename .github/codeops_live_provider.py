@@ -28,11 +28,12 @@ def _text_summary(value: Any) -> dict[str, Any]:
 
 
 def _compact_correction_history(payload: dict[str, Any]) -> None:
+    """Preserve correction facts while removing repeated patch/source bulk."""
     previous = payload.get("previous_proposal")
     if isinstance(previous, dict):
         operations = previous.get("operations")
+        compact_operations: list[dict[str, Any]] = []
         if isinstance(operations, list):
-            compact_operations: list[dict[str, Any]] = []
             for item in operations:
                 if not isinstance(item, dict):
                     continue
@@ -46,16 +47,70 @@ def _compact_correction_history(payload: dict[str, Any]) -> None:
                         "new": _text_summary(item.get("new")),
                     }
                 )
-            previous["operations"] = compact_operations
-            previous["operation_text_omitted"] = True
+        payload["previous_proposal"] = {
+            "schema_version": previous.get("schema_version", "1.0"),
+            "summary": str(previous.get("summary", ""))[:600],
+            "operations": compact_operations,
+            "acceptance_checks": list(previous.get("acceptance_checks", []))[:4],
+            "confidence": previous.get("confidence"),
+            "operation_text_omitted": True,
+        }
+
+    evidence = payload.get("correction_evidence")
+    if isinstance(evidence, list):
+        compact_evidence: list[dict[str, Any]] = []
+        remaining_output_chars = 3_600
+        for item in evidence:
+            if not isinstance(item, dict):
+                continue
+            output = item.get("output", "")
+            output = output if isinstance(output, str) else ""
+            allowed = min(1_200, remaining_output_chars)
+            tail = output[-allowed:] if allowed else ""
+            compact_evidence.append(
+                {
+                    "name": item.get("name"),
+                    "returncode": item.get("returncode"),
+                    "output": tail,
+                    "output_original_chars": len(output),
+                    "output_sha256": _sha256(output),
+                }
+            )
+            remaining_output_chars -= len(tail)
+        payload["correction_evidence"] = compact_evidence
+
+    repository = payload.get("repository")
+    if isinstance(repository, dict):
+        instructions = repository.get("instructions")
+        if isinstance(instructions, list):
+            repository["instruction_summaries"] = [
+                {
+                    "chars": len(item),
+                    "sha256": _sha256(item),
+                }
+                for item in instructions
+                if isinstance(item, str)
+            ]
+            repository["instructions"] = []
+
+
+def _emergency_compact_correction(payload: dict[str, Any]) -> None:
+    """Apply a second fail-safe compaction when proof metadata is still too large."""
     evidence = payload.get("correction_evidence")
     if isinstance(evidence, list):
         for item in evidence:
             if isinstance(item, dict) and isinstance(item.get("output"), str):
-                output = item["output"]
-                item["output"] = output[-2400:]
-                item["output_original_chars"] = len(output)
-                item["output_sha256"] = _sha256(output)
+                item["output"] = item["output"][-600:]
+
+    previous = payload.get("previous_proposal")
+    if isinstance(previous, dict):
+        previous.pop("acceptance_checks", None)
+        previous["summary"] = str(previous.get("summary", ""))[:240]
+
+    repository = payload.get("repository")
+    if isinstance(repository, dict):
+        repository.pop("instruction_summaries", None)
+        repository["instructions"] = []
 
 
 def compress_codeops_task(
@@ -141,6 +196,9 @@ def compress_codeops_task(
     repository["files"] = []
     repository["provider_context_truncated"] = bool(raw_files)
     base = _encode(payload)
+    if len(base) > max_chars - 512 and is_correction:
+        _emergency_compact_correction(payload)
+        base = _encode(payload)
     remaining = max_chars - len(base)
     if remaining < 512:
         raise ProviderExecutionError("CodeOps task metadata exceeds the provider context budget")
@@ -227,10 +285,19 @@ class GitHubModelsExecutor:
         timeout: float = 300.0,
     ) -> ProviderExecutionResult:
         number = len(self.calls) + 1
+        try:
+            task_payload = json.loads(task)
+        except json.JSONDecodeError:
+            task_payload = {}
+        is_correction = isinstance(task_payload, dict) and isinstance(
+            task_payload.get("previous_proposal"), dict
+        )
+        effective_max_chars = max(self.max_task_chars, 16_500) if is_correction else self.max_task_chars
+        effective_output_tokens = min(self.max_output_tokens, 2_800) if is_correction else self.max_output_tokens
         provider_task, context_metadata = compress_codeops_task(
             task,
             path_hints=self.path_hints,
-            max_chars=self.max_task_chars,
+            max_chars=effective_max_chars,
             max_file_chars=self.max_file_chars,
         )
         body = {
@@ -240,7 +307,7 @@ class GitHubModelsExecutor:
                 {"role": "user", "content": provider_task},
             ],
             "temperature": 0.1,
-            "max_tokens": self.max_output_tokens,
+            "max_tokens": effective_output_tokens,
         }
         request_text = _encode(body)
         request = urllib.request.Request(
@@ -299,7 +366,7 @@ class GitHubModelsExecutor:
             "finish_reason": payload.get("choices", [{}])[0].get("finish_reason"),
             "usage": payload.get("usage", {}),
             "context": context_metadata,
-            "max_output_tokens": self.max_output_tokens,
+            "max_output_tokens": effective_output_tokens,
             "normalizations": normalizations,
         }
         self.calls.append(call)
