@@ -22,6 +22,46 @@ def _encode(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def _text_summary(value: Any) -> dict[str, Any]:
+    text = value if isinstance(value, str) else ""
+    return {
+        "chars": len(text),
+        "sha256": _sha256(text),
+        "present": bool(text),
+    }
+
+
+def _compact_correction_history(payload: dict[str, Any]) -> None:
+    previous = payload.get("previous_proposal")
+    if isinstance(previous, dict):
+        operations = previous.get("operations")
+        if isinstance(operations, list):
+            compact_operations: list[dict[str, Any]] = []
+            for item in operations:
+                if not isinstance(item, dict):
+                    continue
+                compact_operations.append(
+                    {
+                        "path": item.get("path"),
+                        "action": item.get("action"),
+                        "required": item.get("required", True),
+                        "content": _text_summary(item.get("content")),
+                        "old": _text_summary(item.get("old")),
+                        "new": _text_summary(item.get("new")),
+                    }
+                )
+            previous["operations"] = compact_operations
+            previous["operation_text_omitted"] = True
+    evidence = payload.get("correction_evidence")
+    if isinstance(evidence, list):
+        for item in evidence:
+            if isinstance(item, dict) and isinstance(item.get("output"), str):
+                output = item["output"]
+                item["output"] = output[-2400:]
+                item["output_original_chars"] = len(output)
+                item["output_sha256"] = _sha256(output)
+
+
 def compress_codeops_task(
     task: str,
     *,
@@ -43,6 +83,8 @@ def compress_codeops_task(
     if not isinstance(raw_files, list):
         raise ProviderExecutionError("CodeOps provider repository files are invalid")
 
+    _compact_correction_history(payload)
+
     rules = payload.get("rules")
     if not isinstance(rules, list):
         rules = []
@@ -61,6 +103,7 @@ def compress_codeops_task(
                 "Use only installed ESLint configurations and plugins. Do not extend prettier or any package absent from package.json.",
                 "Use correctness-focused eslint:recommended and @typescript-eslint recommended rules compatible with the existing source. Do not enable type-aware strict, stylistic, quote, indent, comma, maximum-line-length, or formatting rules that create repository-wide churn.",
                 "Keep Vitest as the test framework and make the existing test script run Vitest non-interactively; do not replace it with Node's test runner.",
+                "For src/rate-limit/limiter.ts, preserve every existing export, class method, configuration, and behaviour. Use only minimal exact replace operations for real lint defects; do not write a replacement copy of the file.",
                 "Inspect the recovered rate limiter source and include any necessary real correctness lint fix in the initial proposal so later corrections do not require new file scope.",
             )
         )
@@ -134,6 +177,7 @@ def compress_codeops_task(
         "path_hints": list(path_hints),
         "max_chars": max_chars,
         "max_file_chars": max_file_chars,
+        "correction_history_compacted": "previous_proposal" in payload,
     }
     return compressed, metadata
 
