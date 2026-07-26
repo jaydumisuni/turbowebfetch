@@ -45,6 +45,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           TRIAL_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           TRIAL_RUN_ID: ${{ github.run_id }}
+          PYTHONPATH: ${{ github.workspace }}/.github
         run: |
           python .github/codeops_staged_trial_entry.py 2>&1 | tee codeops-live-trial.log
           test ${PIPESTATUS[0]} -eq 0
