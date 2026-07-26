@@ -24,11 +24,7 @@ def _encode(value: Any) -> str:
 
 def _text_summary(value: Any) -> dict[str, Any]:
     text = value if isinstance(value, str) else ""
-    return {
-        "chars": len(text),
-        "sha256": _sha256(text),
-        "present": bool(text),
-    }
+    return {"chars": len(text), "sha256": _sha256(text), "present": bool(text)}
 
 
 def _compact_correction_history(payload: dict[str, Any]) -> None:
@@ -83,6 +79,7 @@ def compress_codeops_task(
     if not isinstance(raw_files, list):
         raise ProviderExecutionError("CodeOps provider repository files are invalid")
 
+    is_correction = isinstance(payload.get("previous_proposal"), dict)
     _compact_correction_history(payload)
 
     rules = payload.get("rules")
@@ -96,6 +93,14 @@ def compress_codeops_task(
             "Do not invent parallel modules when an existing repository interface satisfies the objective; modify or import the recovered canonical files.",
         )
     )
+    if is_correction:
+        rules.extend(
+            (
+                "This is a correction pass. Fix only the currently failing proof evidence; do not restate or redesign the original solution.",
+                "Preserve every proof gate that already passed. Do not modify its configuration or source unless the current failure explicitly names that file as the cause.",
+                "Use the smallest possible operation set, usually one exact replace in the file named by the failure.",
+            )
+        )
     objective = str(payload.get("objective", "")).lower()
     if "proof surface" in objective:
         rules.extend(
@@ -103,6 +108,8 @@ def compress_codeops_task(
                 "Use only installed ESLint configurations and plugins. Do not extend prettier or any package absent from package.json.",
                 "Use correctness-focused eslint:recommended and @typescript-eslint recommended rules compatible with the existing source. Do not enable type-aware strict, stylistic, quote, indent, comma, maximum-line-length, or formatting rules that create repository-wide churn.",
                 "Keep Vitest as the test framework and make the existing test script run Vitest non-interactively; do not replace it with Node's test runner.",
+                "All relative TypeScript test imports must use the explicit .js extension required by this NodeNext repository.",
+                "Proof tests must assert confirmed existing public behaviour. Do not introduce an assertion that requires changing public behaviour merely to satisfy the test.",
                 "For src/rate-limit/limiter.ts, preserve every existing export, class method, configuration, and behaviour. Use only minimal exact replace operations for real lint defects; do not write a replacement copy of the file.",
                 "Inspect the recovered rate limiter source and include any necessary real correctness lint fix in the initial proposal so later corrections do not require new file scope.",
             )
@@ -177,7 +184,7 @@ def compress_codeops_task(
         "path_hints": list(path_hints),
         "max_chars": max_chars,
         "max_file_chars": max_file_chars,
-        "correction_history_compacted": "previous_proposal" in payload,
+        "correction_history_compacted": is_correction,
     }
     return compressed, metadata
 
@@ -271,10 +278,7 @@ class GitHubModelsExecutor:
         (self.output_directory / f"provider-output-{number}.txt").write_text(
             raw_content, encoding="utf-8"
         )
-        normalized_content, normalizations = normalize_provider_patch(
-            raw_content,
-            Path.cwd(),
-        )
+        normalized_content, normalizations = normalize_provider_patch(raw_content, Path.cwd())
         if normalized_content != raw_content:
             (self.output_directory / f"provider-output-{number}-normalized.txt").write_text(
                 normalized_content, encoding="utf-8"
