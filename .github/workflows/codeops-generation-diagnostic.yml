@@ -1,0 +1,174 @@
+name: codeops-generation-diagnostic
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  models: read
+
+jobs:
+  diagnose-generation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install repository and CodeOps
+        run: |
+          npm ci --ignore-scripts
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install --no-deps --no-build-isolation 'git+https://github.com/jaydumisuni/hunter-codeops.git@main'
+      - name: Capture raw provider generation and parser result
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY' 2>&1 | tee codeops-generation-diagnostic.log
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          import traceback
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          from hunter_codeops.code_ops_coding import generate_coding_plan
+          from hunter_codeops.code_ops_provider import ProviderExecutionResult
+          from hunter_codeops.code_ops_switcher import (
+              ClientKind, ClientRoute, CodeOpsSwitchDecision, ProviderKind, ProviderRoute
+          )
+
+          root = Path.cwd().resolve()
+          objective = """
+          Starting only from this clean repository, implement a production-quality fair,
+          abortable browser-task scheduler integrated into batch fetch. Enforce global and
+          per-domain concurrency, FIFO within domains, cross-domain fairness, queued
+          cancellation and timeout, exactly-once release after worker failure, dynamic batch
+          scheduling, duplicate URL coalescing with original result order, worker-failure
+          isolation, and deterministic Chrome-free tests including at least forty tasks over
+          four domains. Preserve the token bucket and Python process semaphore. Make lint,
+          strict TypeScript, non-interactive tests, and production build pass. Do not edit
+          workflows, lockfiles, licences, or unrelated files. Return the strict CodeOps JSON
+          patch proposal only; you own the implementation and tests.
+          """.strip()
+          token = os.environ["GITHUB_TOKEN"]
+          calls = []
+          route = ProviderRoute(
+              id="github-models-gpt-4.1",
+              kind=ProviderKind.CUSTOM,
+              model="openai/gpt-4.1",
+              endpoint="https://models.github.ai/inference/chat/completions",
+              credential_env="GITHUB_TOKEN",
+              capabilities=("repo_patch",),
+          )
+          decision = CodeOpsSwitchDecision(
+              provider=route,
+              client=ClientRoute("generation-diagnostic", ClientKind.TERMINAL),
+              mode="repo_patch",
+              review_required=True,
+              reason="diagnose genuine CodeOps live generation",
+          )
+
+          def executor(selected, task, *, system_prompt, timeout=300.0):
+              number = len(calls) + 1
+              body = {
+                  "model": selected.provider.model,
+                  "messages": [
+                      {"role": "system", "content": system_prompt},
+                      {"role": "user", "content": task},
+                  ],
+                  "temperature": 0.1,
+                  "max_tokens": 12000,
+              }
+              request_text = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+              request = urllib.request.Request(
+                  selected.provider.endpoint,
+                  data=request_text.encode(),
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "Content-Type": "application/json",
+                      "X-GitHub-Api-Version": "2026-03-10",
+                  },
+                  method="POST",
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=timeout) as response:
+                      response_text = response.read().decode()
+              except urllib.error.HTTPError as exc:
+                  response_text = exc.read().decode(errors="replace")
+                  Path(f"provider-http-error-{number}.txt").write_text(response_text, encoding="utf-8")
+                  raise
+              payload = json.loads(response_text)
+              content = payload["choices"][0]["message"]["content"]
+              Path(f"provider-output-{number}.txt").write_text(content, encoding="utf-8")
+              call = {
+                  "call": number,
+                  "model": selected.provider.model,
+                  "request_sha256": hashlib.sha256(request_text.encode()).hexdigest(),
+                  "response_sha256": hashlib.sha256(response_text.encode()).hexdigest(),
+                  "output_sha256": hashlib.sha256(content.encode()).hexdigest(),
+                  "output_chars": len(content),
+                  "finish_reason": payload.get("choices", [{}])[0].get("finish_reason"),
+                  "usage": payload.get("usage", {}),
+              }
+              calls.append(call)
+              return ProviderExecutionResult(
+                  selected.provider.id,
+                  selected.provider.model,
+                  content,
+                  {"call": number, "response_sha256": call["response_sha256"]},
+              )
+
+          result = {"status": "unknown", "calls": calls}
+          exit_code = 0
+          try:
+              plan = generate_coding_plan(
+                  decision,
+                  objective,
+                  root,
+                  operation_id="grandmaster-live-provider-diagnostic",
+                  executor=executor,
+                  timeout=300.0,
+              )
+              result.update({"status": "plan_generated", "plan": plan.to_dict()})
+          except Exception as exc:
+              result.update({
+                  "status": "generation_failed",
+                  "error_type": type(exc).__name__,
+                  "error": str(exc),
+                  "traceback": traceback.format_exc(),
+              })
+              exit_code = 1
+          result["calls"] = calls
+          Path("codeops-generation-diagnostic.json").write_text(
+              json.dumps(result, indent=2, sort_keys=True), encoding="utf-8"
+          )
+          print(json.dumps(result, indent=2, sort_keys=True))
+          raise SystemExit(exit_code)
+          PY
+          test ${PIPESTATUS[0]} -eq 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: codeops-generation-diagnostic
+          path: |
+            codeops-generation-diagnostic.json
+            codeops-generation-diagnostic.log
+            provider-output-*.txt
+            provider-http-error-*.txt
+          if-no-files-found: warn
+          retention-days: 14
