@@ -157,13 +157,19 @@ describe("FairTaskScheduler", () => {
             Math.max(maximumByKey.get(key) ?? 0, active)
           );
 
-          await new Promise<void>((resolve) => {
-            setTimeout(resolve, (index % 3) + 1);
-          });
-
-          running -= 1;
-          activeByKey.set(key, active - 1);
-          return index;
+          try {
+            await new Promise<void>((resolve) => {
+              setTimeout(resolve, (index % 3) + 1);
+            });
+            return index;
+          } finally {
+            running -= 1;
+            const remaining = Math.max(
+              0,
+              (activeByKey.get(key) ?? 1) - 1
+            );
+            activeByKey.set(key, remaining);
+          }
         });
       })
     );
