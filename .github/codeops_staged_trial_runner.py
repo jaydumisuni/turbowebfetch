@@ -1,8 +1,9 @@
-"""Run the staged trial with conservative hosted-model pacing."""
+"""Run the staged trial with conservative hosted-model pacing and fallback route."""
 from __future__ import annotations
 
 import json
 import time
+from dataclasses import replace
 from typing import Any
 
 import codeops_staged_trial_entry as entry
@@ -47,7 +48,20 @@ def _paced_provider_call(self, *args, **kwargs):
     return result
 
 
+def _fallback_route():
+    """Use a separately rate-limited GitHub Models coding route."""
+    decision = entry.codeops_staged_trial.route()
+    provider = replace(
+        decision.provider,
+        id="github-models-gpt-4.1-mini",
+        model="openai/gpt-4.1-mini",
+        notes="GitHub Models live coding trial fallback after GPT-4.1 quota exhaustion",
+    )
+    return replace(decision, provider=provider)
+
+
 entry.codeops_live_provider.GitHubModelsExecutor.__call__ = _paced_provider_call
+entry.codeops_staged_trial.route = _fallback_route
 
 
 if __name__ == "__main__":
