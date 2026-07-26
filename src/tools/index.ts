@@ -2,15 +2,13 @@
  * Tool exports for the TurboFetch MCP Server.
  *
  * Public fetch operations pass through the fair scheduler. The underlying raw
- * fetch implementation remains available only through an explicit compatibility
- * export from fetch-scheduled.ts.
+ * fetch implementation remains an internal secondary process-safety boundary.
  */
 
 export {
   fetchPage,
   fetch,
   getProcessSchedulerStats,
-  fetchWithoutFairScheduling,
 } from "./fetch-scheduled.js";
 
 export {
