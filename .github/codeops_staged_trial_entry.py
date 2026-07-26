@@ -2,13 +2,37 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from pathlib import Path
 
 import codeops_live_provider
 
 _original_compress = codeops_live_provider.compress_codeops_task
+_original_provider_call = codeops_live_provider.GitHubModelsExecutor.__call__
 _context_number = 0
+_last_provider_call_at = 0.0
+
+
+def _rate_limited_provider_call(self, *args, **kwargs):
+    """Space provider calls and retry one hosted-route throttle response."""
+    global _last_provider_call_at
+    minimum_interval = 25.0
+    elapsed = time.monotonic() - _last_provider_call_at
+    if _last_provider_call_at and elapsed < minimum_interval:
+        time.sleep(minimum_interval - elapsed)
+    try:
+        result = _original_provider_call(self, *args, **kwargs)
+    except codeops_live_provider.ProviderExecutionError as exc:
+        if "HTTP 429" not in str(exc):
+            raise
+        time.sleep(65.0)
+        result = _original_provider_call(self, *args, **kwargs)
+    _last_provider_call_at = time.monotonic()
+    return result
+
+
+codeops_live_provider.GitHubModelsExecutor.__call__ = _rate_limited_provider_call
 
 
 def _compress_with_nodenext_rule(task: str, **kwargs):
