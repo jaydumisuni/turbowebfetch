@@ -1,10 +1,15 @@
-"""Entry point that applies reviewed trial policy without authoring product code."""
+"""Reviewed policy entry point for the live-provider CodeOps trial.
+
+This module constrains provider context, approval scope, call pacing, and proof.
+It never supplies product implementation or correction code.
+"""
 from __future__ import annotations
 
 import json
 import time
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import codeops_live_provider
 
@@ -14,30 +19,31 @@ _context_number = 0
 _last_provider_call_at = 0.0
 
 
-def _is_correction_task(args, kwargs) -> bool:
+def _payload_from_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
     task = kwargs.get("task")
     if not isinstance(task, str) and len(args) >= 2:
         task = args[1]
     if not isinstance(task, str):
-        return False
+        return {}
     try:
         payload = json.loads(task)
     except json.JSONDecodeError:
-        return False
-    return isinstance(payload, dict) and isinstance(payload.get("previous_proposal"), dict)
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _rate_limited_provider_call(self, *args, **kwargs):
-    """Space provider calls, bound corrections, and retry one route throttle."""
+    """Space calls, retry one throttle, and reserve a bounded correction output."""
     global _last_provider_call_at
     minimum_interval = 25.0
     elapsed = time.monotonic() - _last_provider_call_at
     if _last_provider_call_at and elapsed < minimum_interval:
         time.sleep(minimum_interval - elapsed)
 
+    is_correction = isinstance(_payload_from_call(args, kwargs).get("previous_proposal"), dict)
     previous_output_tokens = self.max_output_tokens
-    if _is_correction_task(args, kwargs):
-        self.max_output_tokens = min(previous_output_tokens, 2_200)
+    if is_correction:
+        self.max_output_tokens = min(previous_output_tokens, 1_600)
     try:
         try:
             result = _original_provider_call(self, *args, **kwargs)
@@ -55,75 +61,119 @@ def _rate_limited_provider_call(self, *args, **kwargs):
 codeops_live_provider.GitHubModelsExecutor.__call__ = _rate_limited_provider_call
 
 
-def _compress_with_nodenext_rule(task: str, **kwargs):
-    """Add reviewed rules and preserve the exact bounded provider request as evidence."""
-    global _context_number
-    payload = json.loads(task)
-    is_correction = isinstance(payload.get("previous_proposal"), dict)
-    if is_correction:
-        kwargs["max_chars"] = min(int(kwargs.get("max_chars", 19_000)), 19_000)
-        kwargs["max_file_chars"] = min(int(kwargs.get("max_file_chars", 12_000)), 12_000)
+def _previous_paths(payload: dict[str, Any]) -> tuple[str, ...]:
+    previous = payload.get("previous_proposal")
+    if not isinstance(previous, dict):
+        return ()
+    operations = previous.get("operations")
+    if not isinstance(operations, list):
+        return ()
+    paths: list[str] = []
+    for operation in operations:
+        if not isinstance(operation, dict):
+            continue
+        path = str(operation.get("path", "")).strip()
+        if path and path not in paths:
+            paths.append(path)
+    return tuple(paths)
 
+
+def _append_rules(payload: dict[str, Any], rules_to_add: tuple[str, ...]) -> None:
     rules = payload.get("rules")
     if not isinstance(rules, list):
         rules = []
         payload["rules"] = rules
-    rules.extend(
-        (
-            "This repository uses NodeNext. Every relative import written in TypeScript, including tests, must use the runtime .js extension.",
-            "Never emit a replace operation whose old and new text are identical. When the named line is already correct, diagnose the remaining proof failure from the supplied evidence and current file content instead.",
-        )
+    rules.extend(rules_to_add)
+
+
+def _initial_stage_rules(objective: str) -> tuple[str, ...]:
+    common = (
+        "This repository uses NodeNext. Every relative TypeScript import, including tests, must use the runtime .js extension.",
+        "Never emit a no-op replace whose old and new text are identical.",
     )
-    if is_correction:
-        rules.extend(
-            (
-                "The correction request is token-bounded. Use only the supplied complete current files and failed proof output.",
-                "Copy replace old text exactly from the current file. If exact text is unavailable, return a complete write for that file rather than guessing.",
-            )
-        )
-    objective = str(payload.get("objective", "")).lower()
     if "proof surface" in objective:
-        rules.extend(
-            (
-                "The initial proposal must include src/rate-limit/limiter.test.ts with deterministic Vitest assertions for confirmed extractDomain behaviour. Do not defer this test file to a correction pass because corrections cannot expand the approved file scope.",
-                "Keep the extractDomain test fixture deliberately small and stable. Test only these confirmed cases: https://www.Example.com/path -> www.example.com; http://sub.domain.com -> sub.domain.com; example.com -> example.com; WWW.EXAMPLE.COM -> www.example.com; and throws for the empty string, whitespace-only input, and ://:.",
-                "Do not add any other extractDomain cases, including ports, query strings, scheme-only strings, schemeless paths, or speculative malformed URL behaviour.",
-                "Import extractDomain from ./limiter.js and never change that already-correct NodeNext import during a correction pass.",
-            )
+        return common + (
+            "Include src/rate-limit/limiter.test.ts in the initial proposal so correction scope cannot expand later.",
+            "Use Vitest and import extractDomain from ./limiter.js.",
+            "Test only confirmed behaviour: normal URL/domain lower-casing plus rejection of empty, whitespace-only, and ://: input.",
+            "Use correctness-focused eslint:recommended and @typescript-eslint recommended rules only; do not add Prettier or stylistic formatting rules.",
+            "Configure unused-variable rules to ignore underscore-prefixed arguments, variables, and caught errors.",
+            "Preserve limiter behaviour; only remove the unnecessary slash escape identified by no-useless-escape.",
         )
     if "scheduler core" in objective:
-        rules.extend(
-            (
-                "The initial scheduler implementation must satisfy the repository's existing ESLint rules: do not use explicit any, omit or underscore unused callback arguments, and use const for bindings that are never reassigned.",
-                "Use generics and unknown instead of any in queues, errors, and helper methods while preserving type safety.",
-                "Queue-wait timeout measures only time before work starts. Clear its timer when the task starts and never time out or release capacity for already-running work.",
-                "AbortSignal cancellation must remove and reject queued work before start. Once work starts, do not release scheduler capacity until the worker promise settles; the worker may independently observe the signal.",
-                "Invoke caller work through a promise boundary or explicit try/catch so a synchronous throw becomes a rejected task and capacity is released exactly once in finally.",
-                "Tests for cancellation and queue timeout must first occupy the relevant capacity so the tested task is genuinely queued. Fairness tests must assert early cross-domain progress, not merely final task counts.",
-                "In cancellation and queue-timeout tests, never await the blocker before scheduling the candidate. Keep a blocker promise unresolved, confirm its worker started through a deferred barrier, schedule the candidate while capacity remains occupied, observe cancellation or timeout, then release and await the blocker.",
-                "If proof shows timedOut or cancelled is undefined because the candidate ran normally, correct the test's blocker sequencing rather than changing scheduler timeout semantics.",
-                "Validate global and per-domain concurrency limits as positive integers and reject invalid scheduler configuration.",
-                "Do not declare a local loop-control variable that is assigned but never read, such as started. When one task is started per scheduling pass, start it and return or break directly without an unused flag.",
-                "Never modify .eslintrc.cjs, package.json, or another proof configuration to hide a scheduler-source lint failure. Correct the named scheduler source or scheduler test inside the approved stage scope.",
-            )
+        return common + (
+            "Use generics and unknown, not explicit any.",
+            "Queue timeout applies only before work starts and its timer must be cleared at start.",
+            "Queued AbortSignal cancellation removes and rejects work before start; running capacity is held until the worker settles.",
+            "Synchronous worker throws must become rejected task results and capacity must be released exactly once in finally.",
+            "Cancellation and timeout tests must first occupy capacity with an unresolved blocker before scheduling the candidate.",
+            "Validate global and per-domain limits as positive integers.",
+            "Fix scheduler source/tests rather than weakening lint or proof configuration.",
         )
     if "integrate the existing scheduler core" in objective:
-        rules.extend(
-            (
-                "Modify the canonical src/tools/fetch-batch.ts implementation. Do not create src/tools/batchFetch.ts, src/tools/batch-fetch.ts, or any parallel batch-fetch module.",
-                "The initial proposal must include src/tools/fetch-batch.test.ts so all later corrections remain inside the originally approved scope. Do not place batch tests under tests/.",
-                "Use the existing fetchPage import from ./fetch.js. Do not import fetchPage, a semaphore, a rate limiter, or response types from invented repository paths.",
-                "Use the actual FetchResponse, FetchBatchResult, FetchBatchOptions, ContentFormat, and isSuccessResponse contracts from ../types.js. A response uses success, not ok, and failures contain a nested error object.",
-                "Do not directly acquire or release the token-bucket limiter or Python process semaphore. The real fetchPage path already owns those separate safety boundaries.",
-                "Import and use the previously generated scheduler from ./scheduler.js. Do not duplicate scheduler logic inside fetch-batch.ts.",
-                "Preserve the public fetchBatch, fetchMultiple, and fetchBatchWithProgress exports and their existing option shapes.",
-                "Deduplicate work by exact URL, execute each unique URL once, then place the same FetchResponse at every original index. The returned results length and ordering must match the input.",
-                "Preserve existing succeeded and failed counting semantics: count each unique URL once, not each duplicate output slot.",
-                "Convert an unexpected thrown fetchPage error into a FetchResponse failure for that URL and allow all remaining scheduled work to settle.",
-                "Write deterministic Vitest tests that mock ./fetch.js before importing fetch-batch.ts. Tests must never launch Chrome or Python and must prove dynamic scheduling, duplicate coalescing, original ordering, and worker-failure isolation.",
-                "Satisfy the existing ESLint and strict TypeScript rules without explicit any or unused imports.",
-            )
+        return common + (
+            "Modify canonical src/tools/fetch-batch.ts; do not create a parallel batch module.",
+            "Include src/tools/fetch-batch.test.ts in the initial proposal.",
+            "Use existing fetchPage from ./fetch.js and actual response/types from ../types.js.",
+            "Do not directly acquire token-bucket or Python-process semaphores; fetchPage owns those boundaries.",
+            "Use the generated scheduler from ./scheduler.js.",
+            "Preserve fetchBatch, fetchMultiple, and fetchBatchWithProgress exports and option shapes.",
+            "Fetch each unique URL once, preserve original output length/order, and count success/failure per unique URL.",
+            "Convert an unexpected thrown worker error into a failed FetchResponse and let remaining work finish.",
+            "Mock ./fetch.js in deterministic Vitest tests; never launch Chrome or Python.",
         )
+    return common
+
+
+def _compress_with_reviewed_policy(task: str, **kwargs):
+    """Make correction requests small, exact, and independently auditable."""
+    global _context_number
+    payload = json.loads(task)
+    correction_paths = _previous_paths(payload)
+    is_correction = bool(correction_paths)
+
+    if is_correction:
+        repository = payload.get("repository")
+        if not isinstance(repository, dict):
+            raise codeops_live_provider.ProviderExecutionError(
+                "correction request has no repository context"
+            )
+        files = repository.get("files")
+        if not isinstance(files, list):
+            raise codeops_live_provider.ProviderExecutionError(
+                "correction repository files are invalid"
+            )
+        filtered = [
+            item
+            for item in files
+            if isinstance(item, dict) and str(item.get("path", "")) in correction_paths
+        ]
+        selected_paths = {str(item.get("path", "")) for item in filtered}
+        missing = [path for path in correction_paths if path not in selected_paths]
+        if missing:
+            raise codeops_live_provider.ProviderExecutionError(
+                f"correction context is missing changed files: {missing}"
+            )
+        repository["files"] = filtered
+        evidence = payload.get("correction_evidence")
+        if isinstance(evidence, list):
+            for item in evidence:
+                if isinstance(item, dict) and isinstance(item.get("output"), str):
+                    item["output"] = item["output"][-1_200:]
+        _append_rules(
+            payload,
+            (
+                "Correction pass: change only files from the previous proposal and only for the currently failing proof.",
+                "Every supplied current file is complete and authoritative; copy replace old text exactly from it.",
+                "If an exact replacement is awkward, return one complete write operation for that file. Never guess old text.",
+                "Preserve all proof gates that already passed and do not redesign the stage.",
+            ),
+        )
+        kwargs["max_chars"] = 22_000
+        kwargs["max_file_chars"] = 18_000
+    else:
+        _append_rules(payload, _initial_stage_rules(str(payload.get("objective", "")).lower()))
+
     compressed, metadata = _original_compress(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
         **kwargs,
@@ -132,17 +182,15 @@ def _compress_with_nodenext_rule(task: str, **kwargs):
     evidence_dir = Path("codeops-staged-evidence") / "provider-contexts"
     evidence_dir.mkdir(parents=True, exist_ok=True)
     (evidence_dir / f"provider-task-{_context_number:03d}.json").write_text(
-        compressed,
-        encoding="utf-8",
+        compressed, encoding="utf-8"
     )
     (evidence_dir / f"provider-task-{_context_number:03d}-metadata.json").write_text(
-        json.dumps(metadata, indent=2, sort_keys=True),
-        encoding="utf-8",
+        json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8"
     )
     return compressed, metadata
 
 
-codeops_live_provider.compress_codeops_task = _compress_with_nodenext_rule
+codeops_live_provider.compress_codeops_task = _compress_with_reviewed_policy
 
 import codeops_staged_trial
 
@@ -175,14 +223,7 @@ for stage in codeops_staged_trial.STAGES:
     elif stage.id == "scheduler-core":
         stage = replace(
             stage,
-            path_hints=(
-                *_scheduler_context,
-                "package.json",
-                "tsconfig.json",
-                "src/tools/fetch-batch.ts",
-                "src/tools/fetch.ts",
-                "src/types.ts",
-            ),
+            path_hints=(*_scheduler_context, "package.json", "tsconfig.json", "src/tools/fetch-batch.ts", "src/tools/fetch.ts", "src/types.ts"),
             exact_paths=stage.exact_paths
             | frozenset({"src/tools/scheduler.ts", "src/tools/scheduler.test.ts"}),
             path_prefixes=("src/scheduler/", "src/utils/", "tests/"),
@@ -191,47 +232,17 @@ for stage in codeops_staged_trial.STAGES:
     elif stage.id == "batch-integration":
         stage = replace(
             stage,
-            path_hints=(
-                "src/tools/fetch-batch.ts",
-                "src/tools/fetch-batch.test.ts",
-                "src/tools/scheduler.ts",
-                "src/tools/fetch.ts",
-                "src/types.ts",
-                "package.json",
-                "tsconfig.json",
-            ),
-            exact_paths=frozenset(
-                {
-                    "src/tools/fetch-batch.ts",
-                    "src/tools/fetch-batch.test.ts",
-                    "src/tools/scheduler.ts",
-                    "src/types.ts",
-                }
-            ),
+            path_hints=("src/tools/fetch-batch.ts", "src/tools/fetch-batch.test.ts", "src/tools/scheduler.ts", "src/tools/fetch.ts", "src/types.ts", "package.json", "tsconfig.json"),
+            exact_paths=frozenset({"src/tools/fetch-batch.ts", "src/tools/fetch-batch.test.ts", "src/tools/scheduler.ts", "src/types.ts"}),
             path_prefixes=(),
             max_corrections=3,
         )
     elif stage.id == "challenge-hardening":
         stage = replace(
             stage,
-            path_hints=(
-                "src/tools/scheduler.ts",
-                "src/tools/scheduler.test.ts",
-                "tests/scheduler.test.ts",
-                "src/tools/fetch-batch.ts",
-                "src/tools/fetch-batch.test.ts",
-                "src/types.ts",
-            ),
+            path_hints=("src/tools/scheduler.ts", "src/tools/scheduler.test.ts", "tests/scheduler.test.ts", "src/tools/fetch-batch.ts", "src/tools/fetch-batch.test.ts", "src/types.ts"),
             exact_paths=stage.exact_paths
-            | frozenset(
-                {
-                    "src/tools/scheduler.ts",
-                    "src/tools/scheduler.test.ts",
-                    "src/tools/fetch-batch.ts",
-                    "src/tools/fetch-batch.test.ts",
-                    "src/types.ts",
-                }
-            ),
+            | frozenset({"src/tools/scheduler.ts", "src/tools/scheduler.test.ts", "src/tools/fetch-batch.ts", "src/tools/fetch-batch.test.ts", "src/types.ts"}),
             path_prefixes=("src/scheduler/", "src/utils/", "tests/"),
             max_corrections=3,
         )
