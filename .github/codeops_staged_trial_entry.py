@@ -47,6 +47,23 @@ def _compress_with_nodenext_rule(task: str, **kwargs):
                 "Validate global and per-domain concurrency limits as positive integers and reject invalid scheduler configuration.",
             )
         )
+    if "integrate the existing scheduler core" in objective:
+        rules.extend(
+            (
+                "Modify the canonical src/tools/fetch-batch.ts implementation. Do not create src/tools/batchFetch.ts, src/tools/batch-fetch.ts, or any parallel batch-fetch module.",
+                "The initial proposal must include src/tools/fetch-batch.test.ts so all later corrections remain inside the originally approved scope. Do not place batch tests under tests/.",
+                "Use the existing fetchPage import from ./fetch.js. Do not import fetchPage, a semaphore, a rate limiter, or response types from invented repository paths.",
+                "Use the actual FetchResponse, FetchBatchResult, FetchBatchOptions, ContentFormat, and isSuccessResponse contracts from ../types.js. A response uses success, not ok, and failures contain a nested error object.",
+                "Do not directly acquire or release the token-bucket limiter or Python process semaphore. The real fetchPage path already owns those separate safety boundaries.",
+                "Import and use the previously generated scheduler from ./scheduler.js. Do not duplicate scheduler logic inside fetch-batch.ts.",
+                "Preserve the public fetchBatch, fetchMultiple, and fetchBatchWithProgress exports and their existing option shapes.",
+                "Deduplicate work by exact URL, execute each unique URL once, then place the same FetchResponse at every original index. The returned results length and ordering must match the input.",
+                "Preserve existing succeeded and failed counting semantics: count each unique URL once, not each duplicate output slot.",
+                "Convert an unexpected thrown fetchPage error into a FetchResponse failure for that URL and allow all remaining scheduled work to settle.",
+                "Write deterministic Vitest tests that mock ./fetch.js before importing fetch-batch.ts. Tests must never launch Chrome or Python and must prove dynamic scheduling, duplicate coalescing, original ordering, and worker-failure isolation.",
+                "Satisfy the existing ESLint and strict TypeScript rules without explicit any or unused imports.",
+            )
+        )
     compressed, metadata = _original_compress(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
         **kwargs,
@@ -109,13 +126,50 @@ for stage in codeops_staged_trial.STAGES:
             path_prefixes=("src/scheduler/", "src/utils/", "tests/"),
             max_corrections=3,
         )
-    elif stage.id in {"batch-integration", "challenge-hardening"}:
-        hints = tuple(dict.fromkeys((*_scheduler_context, *stage.path_hints)))
+    elif stage.id == "batch-integration":
         stage = replace(
             stage,
-            path_hints=hints,
-            exact_paths=stage.exact_paths | frozenset({"src/tools/scheduler.ts"}),
+            path_hints=(
+                "src/tools/fetch-batch.ts",
+                "src/tools/fetch-batch.test.ts",
+                "src/tools/scheduler.ts",
+                "src/tools/fetch.ts",
+                "src/types.ts",
+                "package.json",
+                "tsconfig.json",
+            ),
+            exact_paths=frozenset(
+                {
+                    "src/tools/fetch-batch.ts",
+                    "src/tools/fetch-batch.test.ts",
+                    "src/tools/scheduler.ts",
+                    "src/types.ts",
+                }
+            ),
+            path_prefixes=(),
+            max_corrections=3,
+        )
+    elif stage.id == "challenge-hardening":
+        stage = replace(
+            stage,
+            path_hints=(
+                "src/tools/scheduler.ts",
+                "tests/scheduler.test.ts",
+                "src/tools/fetch-batch.ts",
+                "src/tools/fetch-batch.test.ts",
+                "src/types.ts",
+            ),
+            exact_paths=stage.exact_paths
+            | frozenset(
+                {
+                    "src/tools/scheduler.ts",
+                    "src/tools/fetch-batch.ts",
+                    "src/tools/fetch-batch.test.ts",
+                    "src/types.ts",
+                }
+            ),
             path_prefixes=("src/scheduler/", "src/utils/", "tests/"),
+            max_corrections=3,
         )
     _reviewed_stages.append(stage)
 
