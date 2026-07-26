@@ -27,8 +27,25 @@ def _text_summary(value: Any) -> dict[str, Any]:
     return {"chars": len(text), "sha256": _sha256(text), "present": bool(text)}
 
 
+def _previous_paths(payload: dict[str, Any]) -> tuple[str, ...]:
+    previous = payload.get("previous_proposal")
+    if not isinstance(previous, dict):
+        return ()
+    operations = previous.get("operations")
+    if not isinstance(operations, list):
+        return ()
+    paths: list[str] = []
+    for item in operations:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path", "")).strip()
+        if path and path not in paths:
+            paths.append(path)
+    return tuple(paths)
+
+
 def _compact_correction_history(payload: dict[str, Any]) -> None:
-    """Preserve correction facts while removing repeated patch/source bulk."""
+    """Keep correction facts while current workspace files carry exact source text."""
     previous = payload.get("previous_proposal")
     if isinstance(previous, dict):
         operations = previous.get("operations")
@@ -54,18 +71,19 @@ def _compact_correction_history(payload: dict[str, Any]) -> None:
             "acceptance_checks": list(previous.get("acceptance_checks", []))[:4],
             "confidence": previous.get("confidence"),
             "operation_text_omitted": True,
+            "current_workspace_files_are_authoritative": True,
         }
 
     evidence = payload.get("correction_evidence")
     if isinstance(evidence, list):
         compact_evidence: list[dict[str, Any]] = []
-        remaining_output_chars = 3_600
+        remaining_output_chars = 4_800
         for item in evidence:
             if not isinstance(item, dict):
                 continue
             output = item.get("output", "")
             output = output if isinstance(output, str) else ""
-            allowed = min(1_200, remaining_output_chars)
+            allowed = min(1_600, remaining_output_chars)
             tail = output[-allowed:] if allowed else ""
             compact_evidence.append(
                 {
@@ -84,10 +102,7 @@ def _compact_correction_history(payload: dict[str, Any]) -> None:
         instructions = repository.get("instructions")
         if isinstance(instructions, list):
             repository["instruction_summaries"] = [
-                {
-                    "chars": len(item),
-                    "sha256": _sha256(item),
-                }
+                {"chars": len(item), "sha256": _sha256(item)}
                 for item in instructions
                 if isinstance(item, str)
             ]
@@ -95,18 +110,15 @@ def _compact_correction_history(payload: dict[str, Any]) -> None:
 
 
 def _emergency_compact_correction(payload: dict[str, Any]) -> None:
-    """Apply a second fail-safe compaction when proof metadata is still too large."""
     evidence = payload.get("correction_evidence")
     if isinstance(evidence, list):
         for item in evidence:
             if isinstance(item, dict) and isinstance(item.get("output"), str):
-                item["output"] = item["output"][-600:]
-
+                item["output"] = item["output"][-800:]
     previous = payload.get("previous_proposal")
     if isinstance(previous, dict):
         previous.pop("acceptance_checks", None)
         previous["summary"] = str(previous.get("summary", ""))[:240]
-
     repository = payload.get("repository")
     if isinstance(repository, dict):
         repository.pop("instruction_summaries", None)
@@ -120,7 +132,7 @@ def compress_codeops_task(
     max_chars: int = 13_000,
     max_file_chars: int = 5_000,
 ) -> tuple[str, dict[str, Any]]:
-    """Reduce provider context while keeping CodeOps' full local recovery intact."""
+    """Bound provider context while preserving exact correction targets."""
     try:
         payload = json.loads(task)
     except json.JSONDecodeError as exc:
@@ -134,7 +146,8 @@ def compress_codeops_task(
     if not isinstance(raw_files, list):
         raise ProviderExecutionError("CodeOps provider repository files are invalid")
 
-    is_correction = isinstance(payload.get("previous_proposal"), dict)
+    correction_paths = _previous_paths(payload)
+    is_correction = bool(correction_paths)
     _compact_correction_history(payload)
 
     rules = payload.get("rules")
@@ -152,11 +165,14 @@ def compress_codeops_task(
         rules.extend(
             (
                 "This is a correction pass. Fix only the currently failing proof evidence; do not restate or redesign the original solution.",
-                "Preserve every proof gate that already passed. Do not modify its configuration or source unless the current failure explicitly names that file as the cause.",
+                "The current workspace file contents supplied below are authoritative and already include the previous patch attempt.",
+                "For every replace operation, copy old text exactly from the supplied current file. Never reconstruct or paraphrase old text.",
+                "If the exact failing region is not visible, return one complete write operation for that current file or fail closed; do not guess a replacement.",
+                "Preserve every proof gate that already passed and remain inside the approved file scope.",
                 "Use the smallest possible operation set, usually one exact replace in the file named by the failure.",
-                "When a lint failure names an intentionally unused underscore-prefixed variable outside the approved source scope, correct the no-unused-vars configuration instead of requesting or editing that source file.",
             )
         )
+
     objective = str(payload.get("objective", "")).lower()
     if "proof surface" in objective:
         rules.extend(
@@ -167,30 +183,35 @@ def compress_codeops_task(
                 "Configure @typescript-eslint/no-unused-vars to ignore underscore-prefixed arguments, variables, and caught errors using argsIgnorePattern, varsIgnorePattern, and caughtErrorsIgnorePattern set to ^_.",
                 "Keep Vitest as the test framework and make the existing test script run Vitest non-interactively; do not replace it with Node's test runner.",
                 "All relative TypeScript test imports must use the explicit .js extension required by this NodeNext repository.",
-                "Proof tests must assert confirmed existing public behaviour. Do not introduce an assertion that requires changing public behaviour merely to satisfy the test. In particular, do not assert that the string 'not a url' throws because the existing schemeless fallback accepts a leading hostname token.",
-                "For src/rate-limit/limiter.ts, preserve every existing export, class method, configuration, and behaviour. The only expected source correction is a minimal exact replacement removing the unnecessary slash escape identified by no-useless-escape; do not alter token-bucket logic or write a replacement copy of the file.",
-                "Include that minimal regex correction in the initial proposal so later corrections do not require new file scope.",
+                "Proof tests must assert confirmed existing public behaviour. Do not introduce an assertion that requires changing public behaviour merely to satisfy the test.",
+                "For src/rate-limit/limiter.ts, preserve every existing export, class method, configuration, and behaviour. Only remove the unnecessary slash escape identified by no-useless-escape.",
             )
         )
 
-    hint_order = {path: index for index, path in enumerate(path_hints)}
+    ordered_hints: list[str] = []
+    for path in (*correction_paths, *path_hints):
+        if path and path not in ordered_hints:
+            ordered_hints.append(path)
+    hint_order = {path: index for index, path in enumerate(ordered_hints)}
 
     def rank(item: Any) -> tuple[int, int, str]:
         if not isinstance(item, dict):
             return (99, 99, "")
         path = str(item.get("path", ""))
+        if path in correction_paths:
+            return (0, correction_paths.index(path), path)
         for hint, index in hint_order.items():
             if path == hint or path.endswith(hint) or hint in path:
-                return (0, index, path)
+                return (1, index, path)
         if path.startswith("src/") and ("test" in path.lower() or path.endswith(".spec.ts")):
-            return (1, 0, path)
-        if path.startswith("src/"):
             return (2, 0, path)
-        if path in {"package.json", "tsconfig.json", ".eslintrc.cjs", "eslint.config.js"}:
+        if path.startswith("src/"):
             return (3, 0, path)
-        if path.endswith(("README.md", "AGENTS.md", "CONTRIBUTING.md")):
+        if path in {"package.json", "tsconfig.json", ".eslintrc.cjs", "eslint.config.js"}:
             return (4, 0, path)
-        return (5, 0, path)
+        if path.endswith(("README.md", "AGENTS.md", "CONTRIBUTING.md")):
+            return (5, 0, path)
+        return (6, 0, path)
 
     ordered_files = sorted(raw_files, key=rank)
     repository["files"] = []
@@ -205,6 +226,7 @@ def compress_codeops_task(
 
     selected: list[dict[str, Any]] = []
     selected_paths: list[str] = []
+    truncated_paths: list[str] = []
     for item in ordered_files:
         if not isinstance(item, dict) or remaining < 512:
             continue
@@ -212,20 +234,45 @@ def compress_codeops_task(
         content = item.get("content", "")
         if not path or not isinstance(content, str):
             continue
-        content = content[: min(max_file_chars, max(0, remaining - 384))]
+        required_full = is_correction and path in correction_paths
+        allowed_chars = min(max_file_chars, max(0, remaining - 384))
+        if required_full and len(content) > allowed_chars:
+            raise ProviderExecutionError(
+                f"correction context cannot include complete current file: {path}"
+            )
+        selected_content = content if required_full else content[:allowed_chars]
+        if len(selected_content) < len(content):
+            truncated_paths.append(path)
         candidate = dict(item)
-        candidate["content"] = content
+        candidate["content"] = selected_content
+        candidate["content_complete"] = len(selected_content) == len(content)
         encoded = _encode(candidate)
         if len(encoded) + 1 > remaining:
+            if required_full:
+                raise ProviderExecutionError(
+                    f"correction context budget cannot fit complete current file: {path}"
+                )
             continue
         selected.append(candidate)
         selected_paths.append(path)
         remaining -= len(encoded) + 1
 
+    missing_correction_paths = [path for path in correction_paths if path not in selected_paths]
+    if missing_correction_paths:
+        raise ProviderExecutionError(
+            f"correction context omitted current changed files: {missing_correction_paths}"
+        )
+
     repository["files"] = selected
-    repository["provider_context_truncated"] = len(selected) < len(raw_files)
+    repository["provider_context_truncated"] = len(selected) < len(raw_files) or bool(truncated_paths)
     compressed = _encode(payload)
     while selected and len(compressed) > max_chars:
+        last = selected[-1]
+        last_path = str(last.get("path", ""))
+        if last_path in correction_paths:
+            raise ProviderExecutionError(
+                f"bounded correction task would drop authoritative file: {last_path}"
+            )
         selected.pop()
         selected_paths.pop()
         repository["files"] = selected
@@ -242,7 +289,9 @@ def compress_codeops_task(
         "original_file_count": len(raw_files),
         "provider_file_count": len(selected),
         "provider_paths": selected_paths,
-        "path_hints": list(path_hints),
+        "path_hints": ordered_hints,
+        "correction_paths": list(correction_paths),
+        "truncated_paths": truncated_paths,
         "max_chars": max_chars,
         "max_file_chars": max_file_chars,
         "correction_history_compacted": is_correction,
@@ -292,13 +341,22 @@ class GitHubModelsExecutor:
         is_correction = isinstance(task_payload, dict) and isinstance(
             task_payload.get("previous_proposal"), dict
         )
-        effective_max_chars = max(self.max_task_chars, 16_500) if is_correction else self.max_task_chars
-        effective_output_tokens = min(self.max_output_tokens, 2_800) if is_correction else self.max_output_tokens
+        effective_max_chars = max(self.max_task_chars, 36_000) if is_correction else self.max_task_chars
+        effective_max_file_chars = max(self.max_file_chars, 20_000) if is_correction else self.max_file_chars
+        effective_output_tokens = self.max_output_tokens
         provider_task, context_metadata = compress_codeops_task(
             task,
             path_hints=self.path_hints,
             max_chars=effective_max_chars,
-            max_file_chars=self.max_file_chars,
+            max_file_chars=effective_max_file_chars,
+        )
+        context_dir = self.output_directory.parent / "provider-contexts"
+        context_dir.mkdir(parents=True, exist_ok=True)
+        (context_dir / f"provider-task-{number:03d}.json").write_text(
+            provider_task, encoding="utf-8"
+        )
+        (context_dir / f"provider-task-{number:03d}-metadata.json").write_text(
+            json.dumps(context_metadata, indent=2, sort_keys=True), encoding="utf-8"
         )
         body = {
             "model": selected.provider.model,
