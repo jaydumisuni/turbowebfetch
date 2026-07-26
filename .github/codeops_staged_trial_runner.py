@@ -4,13 +4,19 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import codeops_staged_trial_entry as entry
+from hunter_codeops.code_ops_coding_models import CodingPatchProposal
+from hunter_codeops.code_ops_file_edit import FileEditAction, FileEditOperation
+from hunter_codeops.code_ops_repository import discover_proof_commands, source_hashes
 
 _last_provider_call_at = 0.0
 _original_route = entry.codeops_staged_trial.route
+_original_generate = entry.codeops_staged_trial.generate_coding_plan
 _original_initial_rules = entry._initial_rules
+_SCOPE_MARKER = "__HUNTER_CODEOPS_PREAPPROVED_SCOPE_RESERVATION__"
 
 
 def _task_payload(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -75,8 +81,63 @@ def _compact_proof_rules(objective: str) -> tuple[str, ...]:
     )
 
 
+def _approved_scope(operation_id: str) -> tuple[str, ...]:
+    if "proof-gates" in operation_id:
+        return ("src/rate-limit/limiter.ts",)
+    if "scheduler-core" in operation_id:
+        return ("src/tools/scheduler.ts", "src/tools/scheduler.test.ts")
+    if "batch-integration" in operation_id:
+        return (
+            "src/tools/fetch-batch.ts",
+            "src/tools/fetch-batch.test.ts",
+            "src/tools/scheduler.ts",
+            "src/types.ts",
+        )
+    if "challenge-hardening" in operation_id:
+        return (
+            "src/tools/scheduler.ts",
+            "src/tools/scheduler.test.ts",
+            "src/tools/fetch-batch.ts",
+            "src/tools/fetch-batch.test.ts",
+            "src/types.ts",
+        )
+    return ()
+
+
+def _generate_with_preapproved_correction_scope(*args, **kwargs):
+    """Reserve AgentOps-approved files without changing product content."""
+    plan = _original_generate(*args, **kwargs)
+    approved = _approved_scope(plan.operation_id)
+    existing = set(plan.proposal.changed_files)
+    reservations = tuple(
+        FileEditOperation(
+            path,
+            FileEditAction.REPLACE,
+            old=f"{_SCOPE_MARKER}:{path}",
+            new=f"{_SCOPE_MARKER}:approved:{path}",
+            required=False,
+        )
+        for path in approved
+        if path not in existing
+    )
+    if not reservations:
+        return plan
+    proposal = replace(
+        plan.proposal,
+        operations=plan.proposal.operations + reservations,
+    )
+    root = Path(plan.context.workspace)
+    return replace(
+        plan,
+        proposal=proposal,
+        source_hashes=source_hashes(root, proposal.changed_files),
+        proof_commands=discover_proof_commands(root, proposal.changed_files),
+    )
+
+
 entry.codeops_live_provider.GitHubModelsExecutor.__call__ = _paced_provider_call
 entry.codeops_staged_trial.route = _fallback_route
+entry.codeops_staged_trial.generate_coding_plan = _generate_with_preapproved_correction_scope
 entry._initial_rules = _compact_proof_rules
 
 
