@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import codeops_staged_trial_entry as entry
-from hunter_codeops.code_ops_coding_models import CodingPatchProposal, ProofResult
+from hunter_codeops.code_ops_coding_models import ProofResult
 from hunter_codeops.code_ops_file_edit import FileEditAction, FileEditOperation
 from hunter_codeops.code_ops_repository import (
     discover_proof_commands,
@@ -22,6 +22,7 @@ _original_route = entry.codeops_staged_trial.route
 _original_generate = entry.codeops_staged_trial.generate_coding_plan
 _original_execute = entry.codeops_staged_trial.execute_generated_plan
 _original_initial_rules = entry._initial_rules
+_original_reviewed_compress = entry._compress_with_reviewed_policy
 _SCOPE_MARKER = "__HUNTER_CODEOPS_PREAPPROVED_SCOPE_RESERVATION__"
 
 
@@ -86,6 +87,88 @@ def _compact_proof_rules(objective: str) -> tuple[str, ...]:
     )
 
 
+def _compact_correction_context(task: str, **kwargs):
+    payload = json.loads(task)
+    previous = payload.get("previous_proposal")
+    if not isinstance(previous, dict):
+        return _original_reviewed_compress(task, **kwargs)
+
+    previous_paths = entry._previous_paths(payload)
+    selected_paths = entry._failed_paths(payload, previous_paths)
+    repository = payload.get("repository")
+    if not isinstance(repository, dict) or not isinstance(repository.get("files"), list):
+        raise entry.codeops_live_provider.ProviderExecutionError(
+            "correction request has invalid repository files"
+        )
+    selected_files = [
+        item
+        for item in repository["files"]
+        if isinstance(item, dict) and str(item.get("path", "")) in selected_paths
+    ]
+    available = {str(item.get("path", "")) for item in selected_files}
+    missing = [path for path in selected_paths if path not in available]
+    if missing:
+        raise entry.codeops_live_provider.ProviderExecutionError(
+            f"correction context is missing failed files: {missing}"
+        )
+
+    evidence = payload.get("correction_evidence")
+    failed_evidence = []
+    if isinstance(evidence, list):
+        failed_evidence = [
+            {
+                "name": item.get("name"),
+                "returncode": item.get("returncode"),
+                "output": str(item.get("output", ""))[-1_600:],
+            }
+            for item in evidence
+            if isinstance(item, dict)
+        ]
+
+    compact = {
+        "objective": str(payload.get("objective", ""))[:800],
+        "authority_boundary": payload.get("authority_boundary", {}),
+        "required_output_schema": payload.get("required_output_schema", {}),
+        "repository": {
+            "workspace": ".",
+            "instructions": [],
+            "manifests": [],
+            "languages": repository.get("languages", []),
+            "test_systems": repository.get("test_systems", []),
+            "truncated": False,
+            "files": selected_files,
+        },
+        "previous_proposal": {
+            "schema_version": "1.0",
+            "summary": str(previous.get("summary", ""))[:300],
+            "operations": [
+                {
+                    "path": path,
+                    "action": "previously_approved_file",
+                }
+                for path in selected_paths
+            ],
+            "operation_text_omitted": True,
+        },
+        "correction_evidence": failed_evidence,
+        "rules": [
+            "Return one valid JSON object only and include schema_version 1.0.",
+            "Edit only the supplied proof-named files and only for the current failure.",
+            "The supplied file contents are complete and authoritative.",
+            "Use exact small replace operations copied from the file whenever possible.",
+            "Do not expand scope, change proof configuration, or redesign passed behaviour.",
+            "Do not claim tests passed; CodeOps executes proof independently.",
+        ],
+    }
+    compressed, metadata = entry._original_compress(
+        json.dumps(compact, ensure_ascii=False, separators=(",", ":")),
+        max_chars=18_000,
+        max_file_chars=16_000,
+    )
+    metadata["failed_file_focus"] = list(selected_paths)
+    return compressed, metadata
+
+
 def _approved_scope(operation_id: str) -> tuple[str, ...]:
     if "proof-gates" in operation_id:
         return ("src/rate-limit/limiter.ts",)
@@ -139,35 +222,20 @@ def _generate_with_preapproved_correction_scope(*args, **kwargs):
 def _proof_runner_with_eslint_fix(workspace, commands):
     root = Path(workspace)
     completed = subprocess.run(
-        [
-            "npx",
-            "eslint",
-            "--fix",
-            "--config",
-            ".eslintrc.cjs",
-            "src/rate-limit/limiter.ts",
-        ],
+        ["npx", "eslint", "--fix", "--config", ".eslintrc.cjs", "src/rate-limit/limiter.ts"],
         cwd=root,
         text=True,
         capture_output=True,
         timeout=180,
         check=False,
     )
-    output = (completed.stdout or "") + (completed.stderr or "")
     fix_result = ProofResult(
         name="eslint-autofix:src/rate-limit/limiter.ts",
-        argv=(
-            "npx",
-            "eslint",
-            "--fix",
-            "--config",
-            ".eslintrc.cjs",
-            "src/rate-limit/limiter.ts",
-        ),
+        argv=("npx", "eslint", "--fix", "--config", ".eslintrc.cjs", "src/rate-limit/limiter.ts"),
         cwd=".",
         returncode=completed.returncode,
         passed=completed.returncode == 0,
-        output=output,
+        output=(completed.stdout or "") + (completed.stderr or ""),
     )
     return (fix_result,) + run_proof_commands(root, commands)
 
@@ -179,6 +247,7 @@ def _execute_with_approved_tools(decision, plan, **kwargs):
 
 
 entry.codeops_live_provider.GitHubModelsExecutor.__call__ = _paced_provider_call
+entry.codeops_live_provider.compress_codeops_task = _compact_correction_context
 entry.codeops_staged_trial.route = _fallback_route
 entry.codeops_staged_trial.generate_coding_plan = _generate_with_preapproved_correction_scope
 entry.codeops_staged_trial.execute_generated_plan = _execute_with_approved_tools
