@@ -1,9 +1,9 @@
 /**
  * Batch URL fetch implementation.
  *
- * All unique URLs are submitted immediately. The shared fair scheduler in
- * fetch.ts controls actual browser/Python concurrency, avoiding fixed chunk
- * barriers while preserving input order and deduplicating identical URLs.
+ * All unique URLs are submitted immediately. The shared fair scheduler controls
+ * actual browser/Python concurrency, avoiding fixed chunk barriers while
+ * preserving input order and deduplicating identical URLs.
  */
 
 import type {
@@ -15,7 +15,7 @@ import type {
 } from "../types.js";
 import { getDefaultConfig, isSuccessResponse } from "../types.js";
 import { logger } from "../utils/logger.js";
-import { fetchPage } from "./fetch.js";
+import { fetchPage } from "./fetch-scheduled.js";
 
 const config = getDefaultConfig();
 
