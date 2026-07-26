@@ -9,6 +9,7 @@ from typing import Any
 import codeops_staged_trial_entry as entry
 
 _last_provider_call_at = 0.0
+_original_route = entry.codeops_staged_trial.route
 
 
 def _task_payload(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -50,7 +51,7 @@ def _paced_provider_call(self, *args, **kwargs):
 
 def _fallback_route():
     """Use a separately rate-limited GitHub Models coding route."""
-    decision = entry.codeops_staged_trial.route()
+    decision = _original_route()
     provider = replace(
         decision.provider,
         id="github-models-gpt-4.1-mini",
