@@ -6,7 +6,7 @@ import json
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from hunter_codeops.code_ops_provider import ProviderExecutionError, ProviderExecutionResult
 from hunter_codeops.code_ops_switcher import CodeOpsSwitchDecision
@@ -19,8 +19,9 @@ def _sha256(value: str) -> str:
 def compress_codeops_task(
     task: str,
     *,
-    max_chars: int = 10_000,
-    max_file_chars: int = 3_500,
+    path_hints: Sequence[str] = (),
+    max_chars: int = 13_000,
+    max_file_chars: int = 5_000,
 ) -> tuple[str, dict[str, Any]]:
     """Reduce provider context while keeping CodeOps' full local recovery intact."""
     try:
@@ -36,6 +37,26 @@ def compress_codeops_task(
     if not isinstance(raw_files, list):
         raise ProviderExecutionError("CodeOps provider repository files are invalid")
 
+    hint_order = {path: index for index, path in enumerate(path_hints)}
+
+    def rank(item: Any) -> tuple[int, int, str]:
+        if not isinstance(item, dict):
+            return (99, 99, "")
+        path = str(item.get("path", ""))
+        for hint, index in hint_order.items():
+            if path == hint or path.endswith(hint) or hint in path:
+                return (0, index, path)
+        if path.startswith("src/") and ("test" in path.lower() or path.endswith(".spec.ts")):
+            return (1, 0, path)
+        if path.startswith("src/"):
+            return (2, 0, path)
+        if path in {"package.json", "tsconfig.json", ".eslintrc.cjs", "eslint.config.js"}:
+            return (3, 0, path)
+        if path.endswith(("README.md", "AGENTS.md", "CONTRIBUTING.md")):
+            return (4, 0, path)
+        return (5, 0, path)
+
+    ordered_files = sorted(raw_files, key=rank)
     repository["files"] = []
     base = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     remaining = max_chars - len(base)
@@ -43,7 +64,7 @@ def compress_codeops_task(
         raise ProviderExecutionError("CodeOps task metadata exceeds the provider context budget")
     selected: list[dict[str, Any]] = []
     selected_paths: list[str] = []
-    for item in raw_files:
+    for item in ordered_files:
         if not isinstance(item, dict) or remaining < 512:
             continue
         path = str(item.get("path", ""))
@@ -62,6 +83,7 @@ def compress_codeops_task(
 
     repository["files"] = selected
     repository["provider_context_truncated"] = len(selected) < len(raw_files)
+    repository["provider_path_hints"] = list(path_hints)
     compressed = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     if len(compressed) > max_chars:
         raise ProviderExecutionError("bounded provider task still exceeds its character budget")
@@ -73,6 +95,7 @@ def compress_codeops_task(
         "original_file_count": len(raw_files),
         "provider_file_count": len(selected),
         "provider_paths": selected_paths,
+        "path_hints": list(path_hints),
         "max_chars": max_chars,
         "max_file_chars": max_file_chars,
     }
@@ -87,6 +110,9 @@ class GitHubModelsExecutor:
         *,
         model: str = "openai/gpt-4.1",
         endpoint: str = "https://models.github.ai/inference/chat/completions",
+        path_hints: Sequence[str] = (),
+        max_task_chars: int = 13_000,
+        max_file_chars: int = 5_000,
         max_output_tokens: int = 4_000,
     ) -> None:
         if not token:
@@ -94,6 +120,9 @@ class GitHubModelsExecutor:
         self.token = token
         self.model = model
         self.endpoint = endpoint
+        self.path_hints = tuple(path_hints)
+        self.max_task_chars = max_task_chars
+        self.max_file_chars = max_file_chars
         self.max_output_tokens = max_output_tokens
         self.output_directory = Path(output_directory)
         self.output_directory.mkdir(parents=True, exist_ok=True)
@@ -108,7 +137,12 @@ class GitHubModelsExecutor:
         timeout: float = 300.0,
     ) -> ProviderExecutionResult:
         number = len(self.calls) + 1
-        provider_task, context_metadata = compress_codeops_task(task)
+        provider_task, context_metadata = compress_codeops_task(
+            task,
+            path_hints=self.path_hints,
+            max_chars=self.max_task_chars,
+            max_file_chars=self.max_file_chars,
+        )
         body = {
             "model": selected.provider.model,
             "messages": [
