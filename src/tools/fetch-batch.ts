@@ -1,57 +1,36 @@
 /**
- * Batch URL fetch tool implementation
+ * Batch URL fetch implementation.
  *
- * Fetches multiple URLs in parallel using Promise.all,
- * respecting the pool's concurrent limit (14 max).
+ * All unique URLs are submitted immediately. The shared fair scheduler in
+ * fetch.ts controls actual browser/Python concurrency, avoiding fixed chunk
+ * barriers while preserving input order and deduplicating identical URLs.
  */
 
 import type {
+  ContentFormat,
   FetchBatchOptions,
   FetchBatchResult,
+  FetchOptions,
   FetchResponse,
-  ContentFormat,
 } from "../types.js";
-import { isSuccessResponse, getDefaultConfig } from "../types.js";
-import { fetchPage } from "./fetch.js";
+import { getDefaultConfig, isSuccessResponse } from "../types.js";
 import { logger } from "../utils/logger.js";
+import { fetchPage } from "./fetch.js";
 
-// Get configuration
 const config = getDefaultConfig();
 
-// Maximum concurrent fetches (matches Python process limit)
-const MAX_CONCURRENT = config.python.maxProcesses;
+export type BatchFetchWorker = (
+  options: FetchOptions
+) => Promise<FetchResponse>;
 
-/**
- * Chunks an array into smaller arrays of specified size
- */
-function chunkArray<T>(array: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < array.length; i += size) {
-    chunks.push(array.slice(i, i + size));
-  }
-  return chunks;
-}
-
-/**
- * Fetches a batch of URLs in parallel
- *
- * Uses Promise.all to fetch URLs concurrently, limited to
- * MAX_CONCURRENT (14) at a time to match the Python process limit.
- *
- * @param options - Batch fetch options including URLs and format
- * @returns FetchBatchResult with aggregated results
- */
-export async function fetchBatch(
-  options: FetchBatchOptions
+export async function fetchBatchWithWorker(
+  options: FetchBatchOptions,
+  worker: BatchFetchWorker,
+  onProgress?: (completed: number, total: number) => void
 ): Promise<FetchBatchResult> {
   const startTime = Date.now();
   const { urls, format, timeout, human_mode } = options;
   const total = urls.length;
-
-  logger.info("batch_fetch_start", {
-    event: `Starting batch fetch of ${total} URLs`,
-    format,
-  });
 
   if (total === 0) {
     return {
@@ -62,18 +41,15 @@ export async function fetchBatch(
     };
   }
 
-  // Deduplicate URLs while preserving order
-  const seenUrls = new Set<string>();
+  const indicesByUrl = new Map<string, number[]>();
   const uniqueUrls: string[] = [];
-  const urlIndexMap = new Map<string, number[]>();
-
   urls.forEach((url, index) => {
-    if (!seenUrls.has(url)) {
-      seenUrls.add(url);
-      uniqueUrls.push(url);
-      urlIndexMap.set(url, [index]);
+    const indices = indicesByUrl.get(url);
+    if (indices) {
+      indices.push(index);
     } else {
-      urlIndexMap.get(url)!.push(index);
+      indicesByUrl.set(url, [index]);
+      uniqueUrls.push(url);
     }
   });
 
@@ -83,82 +59,45 @@ export async function fetchBatch(
     });
   }
 
-  // Results array matching original input order
-  const results: FetchResponse[] = new Array(total);
+  const results = new Array<FetchResponse>(total);
   let succeeded = 0;
   let failed = 0;
+  let completed = 0;
 
-  // Process in chunks to respect concurrency limit
-  const chunks = chunkArray(uniqueUrls, MAX_CONCURRENT);
+  logger.info("batch_fetch_start", {
+    event: `Scheduling ${uniqueUrls.length} unique URLs`,
+    format,
+    queue_length: uniqueUrls.length,
+  });
 
-  for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-    const chunk = chunks[chunkIndex];
-    const chunkStart = Date.now();
+  await Promise.all(
+    uniqueUrls.map(async (url) => {
+      const result = await runWorkerSafely(worker, {
+        url,
+        format: format as ContentFormat,
+        timeout,
+        human_mode,
+      });
+      const originalIndices = indicesByUrl.get(url) ?? [];
 
-    logger.info("batch_chunk_start", {
-      event: `Processing chunk ${chunkIndex + 1}/${chunks.length}`,
-      queue_length: chunk.length,
-    });
-
-    // Fetch all URLs in chunk concurrently
-    const chunkResults = await Promise.all(
-      chunk.map(async (url): Promise<FetchResponse> => {
-        try {
-          return await fetchPage({
-            url,
-            format: format as ContentFormat,
-            timeout,
-            human_mode,
-          });
-        } catch (error) {
-          // This shouldn't happen as fetchPage handles errors internally,
-          // but just in case, wrap any uncaught errors
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          logger.error("batch_uncaught_error", {
-            url,
-            event: `Uncaught error: ${errorMessage}`,
-          });
-          return {
-            success: false,
-            error: {
-              code: "UNKNOWN",
-              message: `Unexpected error: ${errorMessage}`,
-            },
-            url,
-          };
-        }
-      })
-    );
-
-    // Map results back to original indices (handles duplicates)
-    chunkResults.forEach((result, idx) => {
-      const url = chunk[idx];
-      const originalIndices = urlIndexMap.get(url)!;
-
-      // Place result at all original indices (for duplicates)
       for (const originalIndex of originalIndices) {
         results[originalIndex] = result;
       }
 
-      // Count successes/failures (only once per unique URL)
       if (isSuccessResponse(result)) {
-        succeeded++;
+        succeeded += 1;
       } else {
-        failed++;
+        failed += 1;
       }
-    });
 
-    const chunkDuration = Date.now() - chunkStart;
-    logger.info("batch_chunk_complete", {
-      event: `Chunk ${chunkIndex + 1} completed`,
-      duration_ms: chunkDuration,
-    });
-  }
+      completed += originalIndices.length;
+      onProgress?.(completed, total);
+    })
+  );
 
-  const totalDuration = Date.now() - startTime;
   logger.info("batch_fetch_complete", {
     event: `Batch fetch completed: ${succeeded}/${uniqueUrls.length} succeeded`,
-    duration_ms: totalDuration,
+    duration_ms: Date.now() - startTime,
   });
 
   return {
@@ -169,10 +108,12 @@ export async function fetchBatch(
   };
 }
 
-/**
- * Convenience function for batch fetching with inline options
- * (matches the simpler interface from PRD)
- */
+export async function fetchBatch(
+  options: FetchBatchOptions
+): Promise<FetchBatchResult> {
+  return fetchBatchWithWorker(options, fetchPage);
+}
+
 export async function fetchMultiple(
   urls: string[],
   options: {
@@ -189,65 +130,32 @@ export async function fetchMultiple(
   });
 }
 
-/**
- * Fetches a batch of URLs with a callback for progress tracking
- */
 export async function fetchBatchWithProgress(
   options: FetchBatchOptions,
   onProgress?: (completed: number, total: number) => void
 ): Promise<FetchBatchResult> {
-  const { urls, format, timeout, human_mode } = options;
-  const total = urls.length;
+  return fetchBatchWithWorker(options, fetchPage, onProgress);
+}
 
-  if (total === 0) {
+async function runWorkerSafely(
+  worker: BatchFetchWorker,
+  options: FetchOptions
+): Promise<FetchResponse> {
+  try {
+    return await worker(options);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error("batch_uncaught_error", {
+      url: options.url,
+      event: `Uncaught error: ${message}`,
+    });
     return {
-      results: [],
-      total: 0,
-      succeeded: 0,
-      failed: 0,
+      success: false,
+      error: {
+        code: "UNKNOWN",
+        message: `Unexpected error: ${message}`,
+      },
+      url: options.url,
     };
   }
-
-  const results: FetchResponse[] = [];
-  let succeeded = 0;
-  let failed = 0;
-  let completed = 0;
-
-  // Process in chunks for concurrency limit
-  const chunks = chunkArray(urls, MAX_CONCURRENT);
-
-  for (const chunk of chunks) {
-    const chunkResults = await Promise.all(
-      chunk.map((url) =>
-        fetchPage({
-          url,
-          format: format as ContentFormat,
-          timeout,
-          human_mode,
-        })
-      )
-    );
-
-    for (const result of chunkResults) {
-      results.push(result);
-      completed++;
-
-      if (isSuccessResponse(result)) {
-        succeeded++;
-      } else {
-        failed++;
-      }
-
-      if (onProgress) {
-        onProgress(completed, total);
-      }
-    }
-  }
-
-  return {
-    results,
-    total,
-    succeeded,
-    failed,
-  };
 }
