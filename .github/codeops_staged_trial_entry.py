@@ -35,6 +35,18 @@ def _compress_with_nodenext_rule(task: str, **kwargs):
                 "Do not assert extractDomain('http://') throws because the fallback currently accepts it as hostname 'http'. Use only confirmed invalid inputs such as the empty string, whitespace-only input, or '://:'.",
             )
         )
+    if "scheduler core" in objective:
+        rules.extend(
+            (
+                "The initial scheduler implementation must satisfy the repository's existing ESLint rules: do not use explicit any, omit or underscore unused callback arguments, and use const for bindings that are never reassigned.",
+                "Use generics and unknown instead of any in queues, errors, and helper methods while preserving type safety.",
+                "Queue-wait timeout measures only time before work starts. Clear its timer when the task starts and never time out or release capacity for already-running work.",
+                "AbortSignal cancellation must remove and reject queued work before start. Once work starts, do not release scheduler capacity until the worker promise settles; the worker may independently observe the signal.",
+                "Invoke caller work through a promise boundary or explicit try/catch so a synchronous throw becomes a rejected task and capacity is released exactly once in finally.",
+                "Tests for cancellation and queue timeout must first occupy the relevant capacity so the tested task is genuinely queued. Fairness tests must assert early cross-domain progress, not merely final task counts.",
+                "Validate global and per-domain concurrency limits as positive integers and reject invalid scheduler configuration.",
+            )
+        )
     compressed, metadata = _original_compress(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
         **kwargs,
