@@ -16,6 +16,10 @@ def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _encode(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
 def compress_codeops_task(
     task: str,
     *,
@@ -58,10 +62,12 @@ def compress_codeops_task(
 
     ordered_files = sorted(raw_files, key=rank)
     repository["files"] = []
-    base = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    repository["provider_context_truncated"] = bool(raw_files)
+    base = _encode(payload)
     remaining = max_chars - len(base)
     if remaining < 512:
         raise ProviderExecutionError("CodeOps task metadata exceeds the provider context budget")
+
     selected: list[dict[str, Any]] = []
     selected_paths: list[str] = []
     for item in ordered_files:
@@ -71,11 +77,11 @@ def compress_codeops_task(
         content = item.get("content", "")
         if not path or not isinstance(content, str):
             continue
-        content = content[: min(max_file_chars, max(0, remaining - 256))]
+        content = content[: min(max_file_chars, max(0, remaining - 384))]
         candidate = dict(item)
         candidate["content"] = content
-        encoded = json.dumps(candidate, ensure_ascii=False, separators=(",", ":"))
-        if len(encoded) > remaining:
+        encoded = _encode(candidate)
+        if len(encoded) + 1 > remaining:
             continue
         selected.append(candidate)
         selected_paths.append(path)
@@ -83,10 +89,16 @@ def compress_codeops_task(
 
     repository["files"] = selected
     repository["provider_context_truncated"] = len(selected) < len(raw_files)
-    repository["provider_path_hints"] = list(path_hints)
-    compressed = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    compressed = _encode(payload)
+    while selected and len(compressed) > max_chars:
+        selected.pop()
+        selected_paths.pop()
+        repository["files"] = selected
+        repository["provider_context_truncated"] = True
+        compressed = _encode(payload)
     if len(compressed) > max_chars:
         raise ProviderExecutionError("bounded provider task still exceeds its character budget")
+
     metadata = {
         "original_task_chars": len(task),
         "original_task_sha256": _sha256(task),
@@ -152,7 +164,7 @@ class GitHubModelsExecutor:
             "temperature": 0.1,
             "max_tokens": self.max_output_tokens,
         }
-        request_text = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+        request_text = _encode(body)
         request = urllib.request.Request(
             selected.provider.endpoint,
             data=request_text.encode("utf-8"),
