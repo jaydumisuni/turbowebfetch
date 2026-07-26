@@ -48,7 +48,7 @@ export async function fetchPage(
     logger.info("scheduler_acquire", {
       url: options.url,
       domain,
-      ...processScheduler.stats,
+      ...schedulerLogFields(domain),
     });
     const lease = await processScheduler.acquire(domain);
 
@@ -56,7 +56,7 @@ export async function fetchPage(
       logger.info("scheduler_acquired", {
         url: options.url,
         domain,
-        ...processScheduler.stats,
+        ...schedulerLogFields(domain),
       });
       return await fetchPageUnscheduled(options);
     } finally {
@@ -64,7 +64,7 @@ export async function fetchPage(
       logger.info("scheduler_released", {
         url: options.url,
         domain,
-        ...processScheduler.stats,
+        ...schedulerLogFields(domain),
       });
     }
   } catch (error) {
@@ -115,6 +115,18 @@ export function getProcessSchedulerStats() {
 
 /** Raw compatibility export for callers that explicitly need the old path. */
 export const fetchWithoutFairScheduling = fetchUnscheduled;
+
+function schedulerLogFields(domain: string) {
+  const stats = processScheduler.stats;
+  return {
+    scheduler_running: stats.running,
+    scheduler_queued: stats.queued,
+    scheduler_max: stats.maxConcurrent,
+    scheduler_per_domain_max: stats.maxConcurrentPerKey,
+    scheduler_domain_running: stats.activeByKey[domain] ?? 0,
+    scheduler_domain_queued: stats.queuedByKey[domain] ?? 0,
+  };
+}
 
 function parsePositiveInteger(
   value: string | undefined,
