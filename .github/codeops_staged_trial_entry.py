@@ -14,20 +14,40 @@ _context_number = 0
 _last_provider_call_at = 0.0
 
 
+def _is_correction_task(args, kwargs) -> bool:
+    task = kwargs.get("task")
+    if not isinstance(task, str) and len(args) >= 2:
+        task = args[1]
+    if not isinstance(task, str):
+        return False
+    try:
+        payload = json.loads(task)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict) and isinstance(payload.get("previous_proposal"), dict)
+
+
 def _rate_limited_provider_call(self, *args, **kwargs):
-    """Space provider calls and retry one hosted-route throttle response."""
+    """Space provider calls, bound corrections, and retry one route throttle."""
     global _last_provider_call_at
     minimum_interval = 25.0
     elapsed = time.monotonic() - _last_provider_call_at
     if _last_provider_call_at and elapsed < minimum_interval:
         time.sleep(minimum_interval - elapsed)
+
+    previous_output_tokens = self.max_output_tokens
+    if _is_correction_task(args, kwargs):
+        self.max_output_tokens = min(previous_output_tokens, 2_200)
     try:
-        result = _original_provider_call(self, *args, **kwargs)
-    except codeops_live_provider.ProviderExecutionError as exc:
-        if "HTTP 429" not in str(exc):
-            raise
-        time.sleep(65.0)
-        result = _original_provider_call(self, *args, **kwargs)
+        try:
+            result = _original_provider_call(self, *args, **kwargs)
+        except codeops_live_provider.ProviderExecutionError as exc:
+            if "HTTP 429" not in str(exc):
+                raise
+            time.sleep(65.0)
+            result = _original_provider_call(self, *args, **kwargs)
+    finally:
+        self.max_output_tokens = previous_output_tokens
     _last_provider_call_at = time.monotonic()
     return result
 
@@ -39,6 +59,11 @@ def _compress_with_nodenext_rule(task: str, **kwargs):
     """Add reviewed rules and preserve the exact bounded provider request as evidence."""
     global _context_number
     payload = json.loads(task)
+    is_correction = isinstance(payload.get("previous_proposal"), dict)
+    if is_correction:
+        kwargs["max_chars"] = min(int(kwargs.get("max_chars", 19_000)), 19_000)
+        kwargs["max_file_chars"] = min(int(kwargs.get("max_file_chars", 12_000)), 12_000)
+
     rules = payload.get("rules")
     if not isinstance(rules, list):
         rules = []
@@ -49,6 +74,13 @@ def _compress_with_nodenext_rule(task: str, **kwargs):
             "Never emit a replace operation whose old and new text are identical. When the named line is already correct, diagnose the remaining proof failure from the supplied evidence and current file content instead.",
         )
     )
+    if is_correction:
+        rules.extend(
+            (
+                "The correction request is token-bounded. Use only the supplied complete current files and failed proof output.",
+                "Copy replace old text exactly from the current file. If exact text is unavailable, return a complete write for that file rather than guessing.",
+            )
+        )
     objective = str(payload.get("objective", "")).lower()
     if "proof surface" in objective:
         rules.extend(
