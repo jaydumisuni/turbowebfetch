@@ -18,10 +18,7 @@ import {
 import { extractDomain } from "../rate-limit/limiter.js";
 import { FairTaskScheduler } from "../scheduler/fair-scheduler.js";
 import { logger } from "../utils/logger.js";
-import {
-  fetch as fetchUnscheduled,
-  fetchPage as fetchPageUnscheduled,
-} from "./fetch.js";
+import { fetchPage as fetchPageUnscheduled } from "./fetch.js";
 
 const config = getDefaultConfig();
 const maxPerDomain = parsePositiveInteger(
@@ -50,23 +47,23 @@ export async function fetchPage(
       domain,
       ...schedulerLogFields(domain),
     });
-    const lease = await processScheduler.acquire(domain);
 
-    try {
+    return await processScheduler.run(domain, async () => {
       logger.info("scheduler_acquired", {
         url: options.url,
         domain,
         ...schedulerLogFields(domain),
       });
-      return await fetchPageUnscheduled(options);
-    } finally {
-      lease.release();
-      logger.info("scheduler_released", {
-        url: options.url,
-        domain,
-        ...schedulerLogFields(domain),
-      });
-    }
+      try {
+        return await fetchPageUnscheduled(options);
+      } finally {
+        logger.info("scheduler_task_complete", {
+          url: options.url,
+          domain,
+          ...schedulerLogFields(domain),
+        });
+      }
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error("scheduler_rejected", {
@@ -87,19 +84,6 @@ export async function fetch(
     human_mode?: boolean;
   } = {}
 ): Promise<FetchResponse> {
-  if (
-    options.format === undefined &&
-    options.wait_for === undefined &&
-    options.timeout === undefined &&
-    options.human_mode === undefined
-  ) {
-    return fetchPage({
-      url,
-      format: "text",
-      timeout: config.timeouts.navigation,
-    });
-  }
-
   return fetchPage({
     url,
     format: options.format ?? "text",
@@ -112,9 +96,6 @@ export async function fetch(
 export function getProcessSchedulerStats() {
   return processScheduler.stats;
 }
-
-/** Raw compatibility export for callers that explicitly need the old path. */
-export const fetchWithoutFairScheduling = fetchUnscheduled;
 
 function schedulerLogFields(domain: string) {
   const stats = processScheduler.stats;
