@@ -10,6 +10,10 @@ permissions:
   contents: read
   models: read
 
+concurrency:
+  group: codeops-live-provider-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   codeops-codes:
     runs-on: ubuntu-latest
@@ -34,6 +38,8 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install --no-deps --no-build-isolation 'git+https://github.com/jaydumisuni/hunter-codeops.git@main'
           python -m pip install --no-deps --no-build-isolation 'git+https://github.com/jaydumisuni/Sergeant.git@main'
+      - name: Cool down the hosted coding route
+        run: sleep 75
       - name: Let CodeOps author, correct, and prove every stage
         env:
           GITHUB_TOKEN: ${{ github.token }}
