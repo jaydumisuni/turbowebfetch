@@ -148,6 +148,7 @@ import codeops_staged_trial
 
 _scheduler_context = (
     "src/tools/scheduler.ts",
+    "src/tools/scheduler.test.ts",
     "src/scheduler/Scheduler.ts",
     "src/scheduler/Scheduler.test.ts",
     "src/scheduler/scheduler.ts",
@@ -182,7 +183,8 @@ for stage in codeops_staged_trial.STAGES:
                 "src/tools/fetch.ts",
                 "src/types.ts",
             ),
-            exact_paths=stage.exact_paths | frozenset({"src/tools/scheduler.ts"}),
+            exact_paths=stage.exact_paths
+            | frozenset({"src/tools/scheduler.ts", "src/tools/scheduler.test.ts"}),
             path_prefixes=("src/scheduler/", "src/utils/", "tests/"),
             max_corrections=3,
         )
@@ -214,6 +216,7 @@ for stage in codeops_staged_trial.STAGES:
             stage,
             path_hints=(
                 "src/tools/scheduler.ts",
+                "src/tools/scheduler.test.ts",
                 "tests/scheduler.test.ts",
                 "src/tools/fetch-batch.ts",
                 "src/tools/fetch-batch.test.ts",
@@ -223,6 +226,7 @@ for stage in codeops_staged_trial.STAGES:
             | frozenset(
                 {
                     "src/tools/scheduler.ts",
+                    "src/tools/scheduler.test.ts",
                     "src/tools/fetch-batch.ts",
                     "src/tools/fetch-batch.test.ts",
                     "src/types.ts",
