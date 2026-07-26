@@ -19,8 +19,8 @@ def _sha256(value: str) -> str:
 def compress_codeops_task(
     task: str,
     *,
-    max_chars: int = 48_000,
-    max_file_chars: int = 7_000,
+    max_chars: int = 10_000,
+    max_file_chars: int = 3_500,
 ) -> tuple[str, dict[str, Any]]:
     """Reduce provider context while keeping CodeOps' full local recovery intact."""
     try:
@@ -39,6 +39,8 @@ def compress_codeops_task(
     repository["files"] = []
     base = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     remaining = max_chars - len(base)
+    if remaining < 512:
+        raise ProviderExecutionError("CodeOps task metadata exceeds the provider context budget")
     selected: list[dict[str, Any]] = []
     selected_paths: list[str] = []
     for item in raw_files:
@@ -85,12 +87,14 @@ class GitHubModelsExecutor:
         *,
         model: str = "openai/gpt-4.1",
         endpoint: str = "https://models.github.ai/inference/chat/completions",
+        max_output_tokens: int = 4_000,
     ) -> None:
         if not token:
             raise ProviderExecutionError("GitHub Models token is unavailable")
         self.token = token
         self.model = model
         self.endpoint = endpoint
+        self.max_output_tokens = max_output_tokens
         self.output_directory = Path(output_directory)
         self.output_directory.mkdir(parents=True, exist_ok=True)
         self.calls: list[dict[str, Any]] = []
@@ -112,7 +116,7 @@ class GitHubModelsExecutor:
                 {"role": "user", "content": provider_task},
             ],
             "temperature": 0.1,
-            "max_tokens": 12_000,
+            "max_tokens": self.max_output_tokens,
         }
         request_text = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
         request = urllib.request.Request(
@@ -163,6 +167,7 @@ class GitHubModelsExecutor:
             "finish_reason": payload.get("choices", [{}])[0].get("finish_reason"),
             "usage": payload.get("usage", {}),
             "context": context_metadata,
+            "max_output_tokens": self.max_output_tokens,
         }
         self.calls.append(call)
         return ProviderExecutionResult(
